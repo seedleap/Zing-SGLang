@@ -266,7 +266,7 @@ class WanT2VCrossAttention(WanSelfAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, is_cross_attention=True)
 
-    def forward(self, x, context, context_lens):
+    def forward(self, x, context, context_lens, crossattn_cache=None):
         r"""
         Args:
             x(Tensor): Shape [B, L1, C]
@@ -280,15 +280,21 @@ class WanT2VCrossAttention(WanSelfAttention):
             q = self.norm_q(q)
         q = q.unflatten(2, (self.local_num_heads, self.head_dim))
 
-        k, _ = self.to_k(context)
-        if self.tp_rmsnorm:
-            k = tensor_parallel_rms_norm(k, self.norm_k)
+        if crossattn_cache is not None and crossattn_cache.is_init:
+            k = crossattn_cache.k
+            v = crossattn_cache.v
         else:
-            k = self.norm_k(k)
-        k = k.unflatten(2, (self.local_num_heads, self.head_dim))
+            k, _ = self.to_k(context)
+            if self.tp_rmsnorm:
+                k = tensor_parallel_rms_norm(k, self.norm_k)
+            else:
+                k = self.norm_k(k)
+            k = k.unflatten(2, (self.local_num_heads, self.head_dim))
 
-        v, _ = self.to_v(context)
-        v = v.unflatten(2, (self.local_num_heads, self.head_dim))
+            v, _ = self.to_v(context)
+            v = v.unflatten(2, (self.local_num_heads, self.head_dim))
+            if crossattn_cache is not None:
+                crossattn_cache.store(k, v)
 
         # compute attention
         x = self.attn(q, k, v)

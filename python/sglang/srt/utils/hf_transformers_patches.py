@@ -54,6 +54,18 @@ def apply_all():
     _applied = True
 
     _mute_diffusers_torchao_probe()
+    # Every patch below targets APIs added, changed, or removed in
+    # transformers v5. Importing the v5-only model modules on a v4 runtime is
+    # not a harmless no-op: optional packages can take over those imports and
+    # reject the older transformers dataclasses. Keep source-tree SGLang
+    # usable in model images that intentionally pin transformers v4.
+    if int(transformers.__version__.split(".", 1)[0]) < 5:
+        patch_is_base_mistral_in_ci()
+        logger.debug(
+            "transformers v5 compatibility patches skipped for transformers %s",
+            transformers.__version__,
+        )
+        return
 
     # v5.4 patches
     _patch_flash_attn_availability()

@@ -6,6 +6,9 @@ This module provides helper functions to enable cache-dit acceleration
 on transformer modules in SGLang's modular pipeline architecture.
 """
 
+from __future__ import annotations
+
+import os
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -13,6 +16,7 @@ import torch
 import torch.distributed as dist
 
 from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+    get_dit_group,
     get_ring_parallel_world_size,
     get_tp_world_size,
     get_ulysses_parallel_world_size,
@@ -21,19 +25,22 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 
-import cache_dit
-from cache_dit import (
-    BlockAdapter,
-    DBCacheConfig,
-    ForwardPattern,
-    ParamsModifier,
-    TaylorSeerCalibratorConfig,
-    steps_mask,
+_CACHE_DIT_ENABLED = os.getenv("SGLANG_CACHE_DIT_ENABLED", "").lower() in (
+    "1",
+    "true",
 )
-from cache_dit.caching.block_adapters import BlockAdapterRegister
-from cache_dit.parallelism import ParallelismBackend, ParallelismConfig
-
-from sglang.multimodal_gen.runtime.distributed.parallel_state import get_dit_group
+if _CACHE_DIT_ENABLED:
+    import cache_dit
+    from cache_dit import (
+        BlockAdapter,
+        DBCacheConfig,
+        ForwardPattern,
+        ParamsModifier,
+        TaylorSeerCalibratorConfig,
+        steps_mask,
+    )
+    from cache_dit.caching.block_adapters import BlockAdapterRegister
+    from cache_dit.parallelism import ParallelismBackend, ParallelismConfig
 
 _original_similarity = None
 
@@ -324,24 +331,28 @@ class DualTransformerBlockAdapterSpec:
     has_separate_cfg: bool
 
 
-DUAL_TRANSFORMER_BLOCK_ADAPTER_SPECS: dict[str, DualTransformerBlockAdapterSpec] = {
-    "wan2.2": DualTransformerBlockAdapterSpec(
-        blocks_attr=("blocks", "blocks"),
-        blocks_name=None,
-        forward_pattern=[ForwardPattern.Pattern_2, ForwardPattern.Pattern_2],
-        check_forward_pattern=True,
-        check_num_outputs=False,
-        has_separate_cfg=True,
-    ),
-    "ideogram4": DualTransformerBlockAdapterSpec(
-        blocks_attr=("layers", "layers"),
-        blocks_name=["layers", "layers"],
-        forward_pattern=[ForwardPattern.Pattern_3, ForwardPattern.Pattern_3],
-        check_forward_pattern=False,
-        check_num_outputs=False,
-        has_separate_cfg=False,
-    ),
-}
+DUAL_TRANSFORMER_BLOCK_ADAPTER_SPECS: dict[str, DualTransformerBlockAdapterSpec] = (
+    {
+        "wan2.2": DualTransformerBlockAdapterSpec(
+            blocks_attr=("blocks", "blocks"),
+            blocks_name=None,
+            forward_pattern=[ForwardPattern.Pattern_2, ForwardPattern.Pattern_2],
+            check_forward_pattern=True,
+            check_num_outputs=False,
+            has_separate_cfg=True,
+        ),
+        "ideogram4": DualTransformerBlockAdapterSpec(
+            blocks_attr=("layers", "layers"),
+            blocks_name=["layers", "layers"],
+            forward_pattern=[ForwardPattern.Pattern_3, ForwardPattern.Pattern_3],
+            check_forward_pattern=False,
+            check_num_outputs=False,
+            has_separate_cfg=False,
+        ),
+    }
+    if _CACHE_DIT_ENABLED
+    else {}
+)
 
 
 @dataclass(frozen=True)
@@ -351,20 +362,24 @@ class CustomBlockAdapterSpec:
 
 
 # Custom BlockAdapter metadata for models absent from cache-dit's registry.
-_CUSTOM_BLOCK_ADAPTER_SPECS: dict[str, CustomBlockAdapterSpec] = {
-    "ErnieImageTransformer2DModel": CustomBlockAdapterSpec(
-        blocks_attr="layers",
-        forward_pattern=ForwardPattern.Pattern_3,
-    ),
-    "Krea2Transformer2DModel": CustomBlockAdapterSpec(
-        blocks_attr="transformer_blocks",
-        forward_pattern=ForwardPattern.Pattern_3,
-    ),
-    "MiniMaxH3DiTModel": CustomBlockAdapterSpec(
-        blocks_attr="blocks",
-        forward_pattern=ForwardPattern.Pattern_3,
-    ),
-}
+_CUSTOM_BLOCK_ADAPTER_SPECS: dict[str, CustomBlockAdapterSpec] = (
+    {
+        "ErnieImageTransformer2DModel": CustomBlockAdapterSpec(
+            blocks_attr="layers",
+            forward_pattern=ForwardPattern.Pattern_3,
+        ),
+        "Krea2Transformer2DModel": CustomBlockAdapterSpec(
+            blocks_attr="transformer_blocks",
+            forward_pattern=ForwardPattern.Pattern_3,
+        ),
+        "MiniMaxH3DiTModel": CustomBlockAdapterSpec(
+            blocks_attr="blocks",
+            forward_pattern=ForwardPattern.Pattern_3,
+        ),
+    }
+    if _CACHE_DIT_ENABLED
+    else {}
+)
 
 
 def _build_custom_block_adapter(

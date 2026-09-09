@@ -211,6 +211,12 @@ class PipelineConfig:
     model_path: str = ""
     pipeline_config_path: str | None = None
 
+    # Components that must use the upstream diffusers/transformers
+    # implementation instead of SGLang's optimized implementation.  This is
+    # intentionally opt-in: a pipeline should only use it when its numerical
+    # contract depends on the exact upstream kernels and module structure.
+    native_component_names: tuple[str, ...] = field(default_factory=tuple)
+
     # precision and autocast
     enable_autocast: bool = True
 
@@ -238,6 +244,10 @@ class PipelineConfig:
     vae_tiling: bool = True
     vae_slicing: bool = False
     vae_sp: bool = True
+    # Most pipelines preprocess in the VAE compute dtype. Models whose wire
+    # contract needs the lossless FP32 image grid can opt into running the
+    # model-specific hook before that cast.
+    preprocess_vae_encode_before_dtype_cast: bool = False
 
     # Diffusion Decoder configuration
     # Bounds the attention grid the diffusion decoder's stages see, which is
@@ -935,6 +945,18 @@ class PipelineConfig:
             type=int,
             default=None,
             help="Override the total frame capacity of realtime causal DiT KV cache for pipelines that support it.",
+        )
+        parser.add_argument(
+            f"--{prefix_with_dot}realtime-causal-kv-cache-pool-size",
+            type=int,
+            default=None,
+            help="Number of fixed realtime causal DiT KV-cache slots to preallocate at worker startup.",
+        )
+        parser.add_argument(
+            f"--{prefix_with_dot}realtime-causal-kv-cache-pool-buckets",
+            type=str,
+            default=None,
+            help="Comma-separated exact resolution buckets supported by each startup KV-cache slot.",
         )
 
         # Add VAE configuration arguments

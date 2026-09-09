@@ -169,6 +169,9 @@ class VideoRemixRequest(BaseModel):
 
 class RealtimeVideoGenerationsRequest(VideoGenerationsRequest):
     type: Literal["init"]
+    # Explicit realtime task selection. When omitted, model adapters may infer
+    # I2V from first_frame presence for backwards compatibility.
+    generation_mode: Optional[Literal["i2v", "t2v"]] = None
     # WebSocket does not support multipart/form-data image uploads
     first_frame: Optional[bytes | str] = None
     condition_inputs: Optional[Dict[str, Any]] = None
@@ -182,8 +185,11 @@ class RealtimeVideoGenerationsRequest(VideoGenerationsRequest):
     realtime_output_format: Optional[Literal["raw", "webp", "jpeg"]] = None
     realtime_preview_max_width: Optional[int] = None
     realtime_output_pacing: Optional[bool] = False
+    realtime_interactive_event_grace_ms: Optional[int] = Field(default=0, ge=0, le=2500)
+    playback_ack_enabled: Optional[bool] = False
     realtime_causal_sink_size: Optional[int] = None
     realtime_causal_kv_cache_num_frames: Optional[int] = None
+    trace_id: Optional[str] = None
 
 
 class RealtimeEvent(BaseModel):
@@ -191,6 +197,9 @@ class RealtimeEvent(BaseModel):
     kind: str
     payload: Any = None
     event_id: Optional[int] = None
+    trace_id: Optional[str] = None
+    client_sent_perf_ms: Optional[float] = None
+    client_sent_epoch_ms: Optional[float] = None
 
 
 # Mesh API protocol models

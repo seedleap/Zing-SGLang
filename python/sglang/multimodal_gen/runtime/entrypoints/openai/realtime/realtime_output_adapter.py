@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypedDict
 
@@ -19,6 +20,8 @@ from sglang.multimodal_gen.runtime.utils.realtime_video import (
     RAW_RGB_CHANNELS,
     RAW_RGB_CONTENT_TYPE,
     WEBP_FRAME_CONTENT_TYPE,
+    cancel_async_raw_rgb_frame_reference,
+    materialize_async_raw_rgb_frame_batches,
 )
 
 if TYPE_CHECKING:
@@ -46,11 +49,13 @@ class RealtimeFrameBatchHeader(TypedDict, total=False):
     raw_size: int
     encoding: str
     delta_reference: str
+    trace_id: str
     payload_lengths: list[int]
     event_id: int
     frame_batch_index: int
     num_frame_batches: int
     is_final_frame_batch: bool
+    server_sent_epoch_ms: float
 
 
 class RealtimeFrameBatchMessage(RealtimeFrameBatchHeader, total=False):
@@ -70,6 +75,11 @@ class RealtimeFrameSendStats(TypedDict):
     num_batches: int
     frame_shape: tuple[int, int, int] | None
     content_type: str
+
+
+def _consume_background_task_result(task: asyncio.Task[object]) -> None:
+    if not task.cancelled():
+        task.exception()
 
 
 def empty_frame_send_stats(content_type: str = "") -> RealtimeFrameSendStats:
@@ -124,13 +134,15 @@ def _frame_shape_from_metadata(
 
 
 RAW_RGB_FRAMES_PER_WS_MESSAGE = 16
-ENCODED_PREVIEW_FRAMES_PER_WS_MESSAGE = 6
+ENCODED_PREVIEW_FRAMES_PER_WS_MESSAGE = 1
 FRAME_BATCH_PACK_OFFLOAD_BYTES = 64 * 1024
 WEBP_DEFAULT_QUALITY = 90
 JPEG_DEFAULT_QUALITY = 95
 JPEG_SUBSAMPLING = 0
 RAW_LOSSLESS_OUTPUT_FORMAT = "raw"
 ENCODED_PREVIEW_FORMATS = {"webp", "jpeg"}
+DEFAULT_REALTIME_OUTPUT_FORMAT = "webp"
+DEFAULT_REALTIME_PREVIEW_MAX_WIDTH = 480
 
 
 @dataclass(frozen=True)
@@ -138,6 +150,22 @@ class _TransportPayload:
     content_type: str
     payload: bytes
     metadata: dict[str, int | str | bool | list[int]]
+
+
+def normalize_realtime_output_format(output_format: str | None) -> str:
+    if output_format is None or output_format == "":
+        return DEFAULT_REALTIME_OUTPUT_FORMAT
+    return output_format
+
+
+def normalize_realtime_preview_max_width(
+    *,
+    output_format: str | None,
+    preview_max_width: int | None,
+) -> int | None:
+    if output_format in ENCODED_PREVIEW_FORMATS and preview_max_width is None:
+        return DEFAULT_REALTIME_PREVIEW_MAX_WIDTH
+    return preview_max_width
 
 
 def _split_frame_batch(
@@ -328,7 +356,12 @@ def _should_build_payload_off_loop(
 ) -> bool:
     if content_type != RAW_RGB_CONTENT_TYPE or not transport_frames:
         return False
-    return output_format in ENCODED_PREVIEW_FORMATS or output_format is None
+    return (
+        output_format in ENCODED_PREVIEW_FORMATS
+        or output_format is None
+        or sum(len(frame) for frame in transport_frames)
+        >= FRAME_BATCH_PACK_OFFLOAD_BYTES
+    )
 
 
 def _is_encoded_preview_transport(
@@ -339,32 +372,6 @@ def _is_encoded_preview_transport(
     return (
         output_format in ENCODED_PREVIEW_FORMATS
         and content_type == RAW_RGB_CONTENT_TYPE
-    )
-
-
-async def _build_encoded_preview_payloads(
-    split_batches: list[list[bytes]],
-    *,
-    content_type: str,
-    metadata: dict[str, int | str],
-    output_format: str,
-    transport_quality: int | None,
-    preview_max_width: int | None,
-    event_id: int | None,
-) -> list[_TransportPayload]:
-    return list(
-        await asyncio.gather(
-            *(
-                _build_encoded_preview_payload(
-                    transport_frames,
-                    metadata=metadata,
-                    output_format=output_format,
-                    transport_quality=transport_quality,
-                    preview_max_width=preview_max_width,
-                )
-                for transport_frames in split_batches
-            )
-        )
     )
 
 
@@ -453,6 +460,32 @@ class RawRGBRealtimeOutputAdapter:
     ) -> RealtimeFrameSendStats:
         """send frames through ws"""
         content_type = result.raw_frame_content_type
+        shared_memory_ref = getattr(result, "raw_frame_shared_memory_ref", None)
+        if result.raw_frame_batches is None and shared_memory_ref is not None:
+            try:
+                _validate_async_raw_frame_reference(shared_memory_ref, session, batch)
+            except Exception:
+                cancel_async_raw_rgb_frame_reference(shared_memory_ref)
+                result.raw_frame_shared_memory_ref = None
+                raise
+            materialize_task = asyncio.create_task(
+                asyncio.to_thread(
+                    materialize_async_raw_rgb_frame_batches,
+                    shared_memory_ref,
+                )
+            )
+            try:
+                result.raw_frame_batches = await asyncio.shield(materialize_task)
+            except asyncio.CancelledError:
+                # The thread must finish so a disconnect cannot leak the shared file.
+                try:
+                    cancel_async_raw_rgb_frame_reference(shared_memory_ref)
+                except Exception:
+                    pass
+                materialize_task.add_done_callback(_consume_background_task_result)
+                raise
+            finally:
+                result.raw_frame_shared_memory_ref = None
         if result.raw_frame_batches is None:
             return empty_frame_send_stats(content_type)
         if batch.block_idx == 0:
@@ -463,8 +496,13 @@ class RawRGBRealtimeOutputAdapter:
             if content_type == RAW_RGB_CONTENT_TYPE
             else {}
         )
-        output_format = getattr(batch, "realtime_output_format", None)
-        preview_max_width = getattr(batch, "realtime_preview_max_width", None)
+        output_format = normalize_realtime_output_format(
+            getattr(batch, "realtime_output_format", None)
+        )
+        preview_max_width = normalize_realtime_preview_max_width(
+            output_format=output_format,
+            preview_max_width=getattr(batch, "realtime_preview_max_width", None),
+        )
         stats = await self._send_frame_batches(
             ws,
             result.raw_frame_batches,
@@ -472,6 +510,8 @@ class RawRGBRealtimeOutputAdapter:
             chunk_index_start=batch.block_idx,
             request_id=batch.request_id,
             event_id=getattr(batch, "realtime_event_id", None),
+            trace_id=getattr(batch, "realtime_trace_id", None)
+            or getattr(session, "trace_id", None),
             frame_metadata=frame_metadata,
             output_format=output_format,
             transport_quality=getattr(batch, "output_compression", None),
@@ -489,6 +529,7 @@ class RawRGBRealtimeOutputAdapter:
         chunk_index_start: int,
         request_id: str,
         event_id: int | None = None,
+        trace_id: str | None = None,
         frame_metadata: dict[str, int | str] | None = None,
         output_format: str | None = None,
         transport_quality: int | None = None,
@@ -511,27 +552,21 @@ class RawRGBRealtimeOutputAdapter:
                 )
             )
             num_frame_batches = len(split_batches)
-            encoded_preview_payloads: list[_TransportPayload] | None = None
-            if _is_encoded_preview_transport(
-                content_type=content_type,
-                output_format=output_format,
-            ):
-                timer = RealtimeStageTimer()
-                encoded_preview_payloads = await _build_encoded_preview_payloads(
-                    split_batches,
-                    content_type=content_type,
-                    metadata=metadata,
-                    output_format=output_format,
-                    transport_quality=transport_quality,
-                    preview_max_width=preview_max_width,
-                    event_id=event_id,
-                )
-                stats["raw_payload_build_ms"] += timer.mark_ms()
             for frame_batch_index, transport_frames in enumerate(split_batches):
                 timer = RealtimeStageTimer()
                 transport_metadata = metadata
-                if encoded_preview_payloads is not None:
-                    transport_payload = encoded_preview_payloads[frame_batch_index]
+                if _is_encoded_preview_transport(
+                    content_type=content_type,
+                    output_format=output_format,
+                ):
+                    transport_payload = await _build_encoded_preview_payload(
+                        transport_frames,
+                        metadata=metadata,
+                        output_format=output_format,
+                        transport_quality=transport_quality,
+                        preview_max_width=preview_max_width,
+                    )
+                    stats["raw_payload_build_ms"] += timer.mark_ms()
                 else:
                     if _should_build_payload_off_loop(
                         content_type=content_type,
@@ -568,9 +603,12 @@ class RawRGBRealtimeOutputAdapter:
                     "frame_batch_index": frame_batch_index,
                     "num_frame_batches": num_frame_batches,
                     "is_final_frame_batch": frame_batch_index == num_frame_batches - 1,
+                    "server_sent_epoch_ms": time.time() * 1000,
                 }
                 if event_id is not None:
                     header["event_id"] = event_id
+                if trace_id:
+                    header["trace_id"] = trace_id
                 header.update(transport_metadata)
                 header.update(transport_payload.metadata)
 
@@ -608,3 +646,21 @@ class RawRGBRealtimeOutputAdapter:
 
         stats["ws_write_ms"] = stats["header_write_ms"] + stats["raw_write_ms"]
         return stats
+
+
+def _validate_async_raw_frame_reference(
+    reference: dict,
+    session: GenerateSession,
+    batch: Req,
+) -> None:
+    expected = {
+        "session_id": getattr(session, "id", None),
+        "generation_id": getattr(session, "generation_id", None),
+        "request_id": batch.request_id,
+        "chunk_index": int(batch.block_idx),
+    }
+    mismatched = [key for key, value in expected.items() if reference.get(key) != value]
+    if mismatched:
+        raise ValueError(
+            "asynchronous raw RGB reference identity mismatch: " + ", ".join(mismatched)
+        )

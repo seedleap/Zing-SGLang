@@ -16,6 +16,7 @@ from sglang.multimodal_gen.configs.models.dits.lingbot_world import (
 )
 from sglang.multimodal_gen.configs.models.dits.longlive2 import LongLive2VideoConfig
 from sglang.multimodal_gen.configs.models.dits.minimax_h3 import MiniMaxH3DiTConfig
+from sglang.multimodal_gen.configs.models.dits.minwm import MinWMVideoConfig
 from sglang.multimodal_gen.configs.models.dits.mova_audio import MOVAAudioConfig
 from sglang.multimodal_gen.configs.models.dits.mova_video import MOVAVideoConfig
 from sglang.multimodal_gen.configs.models.dits.sana_video import SanaVideoConfig
@@ -31,6 +32,7 @@ __all__ = [
     "Ideogram4DiTConfig",
     "Ideogram4DistilledDiTConfig",
     "LingBotWorldVideoConfig",
+    "MinWMVideoConfig",
     "LingBotVideoMoEConfig",
     "LongLive2VideoConfig",
     "MiniMaxH3DiTConfig",

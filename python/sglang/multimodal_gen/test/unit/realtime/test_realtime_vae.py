@@ -4,8 +4,12 @@ from types import SimpleNamespace
 
 import torch
 
+from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.text_encoding import (
+    RealtimeTextEncodingStage,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
     CausalVaeDecodingStage,
+    RealtimeImageVAEEncodingStage,
     RealtimeVAEDecodeState,
 )
 
@@ -83,6 +87,7 @@ def test_causal_vae_decoding_stage_keeps_wan_decoder_cache(monkeypatch):
     stage = CausalVaeDecodingStage.__new__(CausalVaeDecodingStage)
     stage.vae = vae
     server_args = SimpleNamespace(
+        component_precisions={},
         pipeline_config=_PipelineConfig(),
         disable_autocast=True,
     )
@@ -161,6 +166,7 @@ def test_causal_vae_decoding_stage_prefers_native_causal_decode(monkeypatch):
     stage = CausalVaeDecodingStage.__new__(CausalVaeDecodingStage)
     stage.vae = vae
     server_args = SimpleNamespace(
+        component_precisions={},
         pipeline_config=_PipelineConfig(),
         disable_autocast=True,
     )
@@ -173,3 +179,305 @@ def test_causal_vae_decoding_stage_prefers_native_causal_decode(monkeypatch):
 
     assert tuple(frames.shape) == (1, 1, 1, 1, 1)
     assert vae.calls == ["causal_decode"]
+
+
+def test_causal_vae_decoding_stage_uses_streaming_taehv_decoder(monkeypatch):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime import (
+        vae as realtime_vae,
+    )
+
+    class _NativeVAE:
+        def __init__(self):
+            self.config = SimpleNamespace(
+                patch_size=2,
+                z_dim=48,
+                latents_mean=(0.0,) * 48,
+                latents_std=(1.0,) * 48,
+            )
+            self.calls = []
+
+        def to(self, device=None, dtype=None):
+            del device, dtype
+            self.calls.append("to")
+            return self
+
+        def causal_decode(self, latents):
+            del latents
+            self.calls.append("causal_decode")
+            raise AssertionError("TAEHV decode should bypass native causal_decode")
+
+    class _StreamingTAEHV:
+        def __init__(self):
+            self.reset_calls = 0
+            self.inputs = []
+            self.pending = []
+
+        def reset(self):
+            self.reset_calls += 1
+
+        def decode(self, latents=None):
+            if latents is not None:
+                self.inputs.append(latents.detach().clone())
+                self.pending.append(torch.full((1, 1, 3, 16, 16), 0.25))
+            if self.pending:
+                return self.pending.pop(0)
+            return None
+
+    class _PipelineConfig:
+        vae_precision = "fp32"
+        vae_tiling = False
+        vae_config = SimpleNamespace(
+            taehv_checkpoint_path="/opt/taehv/taew2_2.pth",
+        )
+
+        def get_decode_scale_and_shift(self, device, dtype, vae):
+            del device, dtype, vae
+            raise AssertionError("TAEHV must receive model-space latents directly")
+
+        def preprocess_decoding(self, latents, server_args, vae=None):
+            del latents, server_args, vae
+            raise AssertionError("TAEHV must bypass native VAE preprocessing")
+
+    streaming = _StreamingTAEHV()
+    monkeypatch.setattr(
+        realtime_vae,
+        "get_local_torch_device",
+        lambda: torch.device("cpu"),
+    )
+    monkeypatch.setattr(
+        realtime_vae.CausalVaeDecodingStage,
+        "_load_taehv_model",
+        lambda self, checkpoint_path, vae_dtype: object(),
+    )
+    monkeypatch.setattr(
+        realtime_vae.CausalVaeDecodingStage,
+        "_create_streaming_taehv_decoder",
+        lambda self, taehv_model: streaming,
+    )
+
+    native_vae = _NativeVAE()
+    decode_state = RealtimeVAEDecodeState()
+    stage = CausalVaeDecodingStage.__new__(CausalVaeDecodingStage)
+    stage.vae = native_vae
+    server_args = SimpleNamespace(
+        component_precisions={},
+        pipeline_config=_PipelineConfig(),
+        disable_autocast=True,
+    )
+
+    model_latents = torch.full((1, 48, 1, 4, 4), 1.5)
+    frames = stage.decode_causal(
+        model_latents,
+        server_args,
+        first_chunk=True,
+        decode_state=decode_state,
+    )
+
+    assert native_vae.calls == []
+    assert streaming.reset_calls == 1
+    assert tuple(streaming.inputs[0].shape) == (1, 1, 48, 4, 4)
+    assert torch.equal(
+        streaming.inputs[0],
+        model_latents.permute(0, 2, 1, 3, 4),
+    )
+    assert tuple(frames.shape) == (1, 3, 1, 16, 16)
+    assert torch.equal(frames, torch.full((1, 3, 1, 16, 16), 0.25))
+
+
+def test_taehv_decode_does_not_declare_native_vae_residency():
+    server_args = SimpleNamespace(
+        component_precisions={},
+        pipeline_config=SimpleNamespace(
+            vae_precision="fp32",
+            vae_config=SimpleNamespace(taehv_checkpoint_path="/tmp/taehv.pth"),
+        ),
+    )
+    stage = CausalVaeDecodingStage.__new__(CausalVaeDecodingStage)
+    stage.component_name = "vae"
+
+    assert stage.component_uses(server_args, "decoder") == []
+
+    server_args.pipeline_config.vae_config.taehv_checkpoint_path = None
+    uses = stage.component_uses(server_args, "decoder")
+    assert [use.component_name for use in uses] == ["vae"]
+
+
+def test_taehv_image_encode_offload_marks_native_vae_as_large_no_prefetch():
+    server_args = SimpleNamespace(
+        component_precisions={},
+        vae_cpu_offload=True,
+        pipeline_config=SimpleNamespace(
+            vae_precision="fp32",
+            vae_config=SimpleNamespace(taehv_checkpoint_path="/tmp/taehv.pth"),
+        ),
+    )
+    stage = RealtimeImageVAEEncodingStage.__new__(RealtimeImageVAEEncodingStage)
+    stage.component_name = "vae"
+
+    uses = stage.component_uses(server_args, "encoder")
+
+    assert len(uses) == 1
+    assert uses[0].component_name == "vae"
+    assert uses[0].memory_intensive is True
+    assert uses[0].allow_prefetch is False
+
+
+def test_realtime_text_offload_does_not_prefetch_cached_encoder():
+    stage = RealtimeTextEncodingStage.__new__(RealtimeTextEncodingStage)
+    stage.text_encoders = [object()]
+    server_args = SimpleNamespace(
+        text_encoder_cpu_offload=True,
+        component_precisions={},
+        pipeline_config=SimpleNamespace(text_encoder_precisions=["fp32"]),
+    )
+
+    uses = stage.component_uses(server_args, "text")
+
+    assert len(uses) == 1
+    assert uses[0].component_name == "text_encoder"
+    assert uses[0].preferred_ready_after_request is False
+    assert uses[0].allow_prefetch is False
+    assert uses[0].memory_intensive is True
+
+
+def test_causal_vae_decoding_stage_preloads_taehv_model(monkeypatch):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime import (
+        vae as realtime_vae,
+    )
+
+    server_args = SimpleNamespace(
+        component_precisions={},
+        pipeline_config=SimpleNamespace(
+            vae_precision="fp32",
+            vae_config=SimpleNamespace(
+                taehv_checkpoint_path="/opt/taehv/taew2_2.pth",
+            ),
+        ),
+    )
+    load_calls = []
+    taehv_model = object()
+
+    def fake_decoding_stage_init(self, vae, pipeline=None, component_name="vae"):
+        self.vae = vae
+        self.pipeline = pipeline
+        self.component_name = component_name
+        self.server_args = server_args
+
+    monkeypatch.setattr(
+        realtime_vae.DecodingStage,
+        "__init__",
+        fake_decoding_stage_init,
+    )
+    monkeypatch.setattr(
+        realtime_vae.CausalVaeDecodingStage,
+        "_load_taehv_model",
+        lambda self, checkpoint_path, vae_dtype: (
+            load_calls.append((checkpoint_path, vae_dtype)) or taehv_model
+        ),
+        raising=False,
+    )
+
+    stage = realtime_vae.CausalVaeDecodingStage(vae=object())
+
+    assert load_calls == [("/opt/taehv/taew2_2.pth", torch.float32)]
+    assert stage._taehv_models == {
+        ("/opt/taehv/taew2_2.pth", torch.float32): taehv_model,
+    }
+
+
+def test_causal_vae_decoding_stage_shares_taehv_weights_between_sessions(monkeypatch):
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime import (
+        vae as realtime_vae,
+    )
+
+    class _StreamingDecoder:
+        def __init__(self, model):
+            self.taehv = model
+
+        def reset(self):
+            pass
+
+    stage = realtime_vae.CausalVaeDecodingStage.__new__(
+        realtime_vae.CausalVaeDecodingStage
+    )
+    stage._taehv_models = {}
+    load_calls = []
+    taehv_model = object()
+    monkeypatch.setattr(
+        stage,
+        "_load_taehv_model",
+        lambda checkpoint_path, vae_dtype: (
+            load_calls.append((checkpoint_path, vae_dtype)) or taehv_model
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        stage,
+        "_create_streaming_taehv_decoder",
+        lambda model: _StreamingDecoder(model),
+        raising=False,
+    )
+
+    first_state = RealtimeVAEDecodeState()
+    second_state = RealtimeVAEDecodeState()
+    first = stage._get_or_create_streaming_taehv_decoder(
+        first_state,
+        "/opt/taehv/taew2_2.pth",
+        torch.float32,
+    )
+    second = stage._get_or_create_streaming_taehv_decoder(
+        second_state,
+        "/opt/taehv/taew2_2.pth",
+        torch.float32,
+    )
+
+    assert load_calls == [("/opt/taehv/taew2_2.pth", torch.float32)]
+    assert first is not second
+    assert first.taehv is taehv_model
+    assert second.taehv is taehv_model
+
+
+def test_causal_vae_decoding_stage_reads_parallel_decode_from_vae_config():
+    class _Session:
+        def __init__(self):
+            self.state = None
+
+        def get_or_create_state(self, state_cls):
+            if self.state is None:
+                self.state = state_cls()
+            return self.state
+
+    class _PipelineConfig:
+        vae_precision = "fp32"
+        vae_tiling = False
+        vae_config = SimpleNamespace(
+            use_parallel_decode=True,
+            parallel_decode_mode="auto",
+        )
+
+        def post_decoding(self, frames, server_args):
+            del server_args
+            return frames
+
+    stage = CausalVaeDecodingStage.__new__(CausalVaeDecodingStage)
+    stage.load_model = lambda: None
+    stage._get_causal_decode_reset_fn = lambda: None
+    stage.decode_causal = lambda latents, server_args, **kwargs: latents + 1
+    batch = SimpleNamespace(
+        block_idx=0,
+        latents=torch.zeros(1, 1, 1, 1, 1),
+        session=_Session(),
+        trajectory_timesteps=None,
+        trajectory_latents=None,
+        rollout_trajectory_data=None,
+        metrics=None,
+    )
+    server_args = SimpleNamespace(
+        component_precisions={},
+        pipeline_config=_PipelineConfig(),
+        disable_autocast=True,
+    )
+
+    output = stage.forward(batch, server_args)
+
+    assert torch.equal(output.output, torch.ones(1, 1, 1, 1, 1))

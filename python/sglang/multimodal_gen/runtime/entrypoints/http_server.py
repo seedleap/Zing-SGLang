@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import torch
-from fastapi import APIRouter, FastAPI, Request, Response
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from sglang.multimodal_gen.configs.sample.sampling_params import SamplingParams
@@ -31,6 +31,15 @@ from sglang.multimodal_gen.runtime.entrypoints.post_training import (
 from sglang.multimodal_gen.runtime.entrypoints.utils import (
     prepare_request,
     save_outputs,
+)
+from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
+    prometheus_content_type,
+    prometheus_latest,
+)
+from sglang.multimodal_gen.runtime.realtime.worker_reservation import (
+    WorkerReservationRegistry,
+    install_worker_reservation_routes,
+    resolve_worker_epoch,
 )
 from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
 from sglang.multimodal_gen.runtime.server_args import ServerArgs, get_global_server_args
@@ -55,6 +64,7 @@ SERVER_WARMUP_BYPASS_PATHS = (
     "/liveness",
     "/health",
     "/health_generate",
+    "/metrics",
     "/model_info",
     "/server_info",
 )
@@ -161,6 +171,22 @@ async def health(request: Request):
     """Report readiness for normal inference traffic."""
     if not request.app.state.server_warmup_done.is_set():
         return Response(status_code=503)
+    registry = getattr(request.app.state, "worker_reservations", None)
+    if isinstance(registry, WorkerReservationRegistry):
+        state = await registry.snapshot()
+        if state.get("lifecycle") == "failed":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "status": "failed",
+                    "reason": "worker reservation watchdog failed",
+                    "oldest_consumed_age_s": state.get("oldest_consumed_age_s", 0.0),
+                    "stale_consumed_reservations": state.get(
+                        "stale_consumed_reservations", 0
+                    ),
+                    "last_progress_age_s": state.get("last_progress_age_s", 0.0),
+                },
+            )
     return {"status": "ok"}
 
 
@@ -255,6 +281,11 @@ async def model_info_endpoint(request: Request):
 async def health_generate(request: Request):
     """Compatibility readiness endpoint; no generation is issued."""
     return await health(request)
+
+
+@health_router.get("/metrics")
+async def metrics():
+    return Response(prometheus_latest(), media_type=prometheus_content_type())
 
 
 @health_router.get("/stats")
@@ -412,6 +443,7 @@ def create_app(server_args: ServerArgs):
             warmup_done is not None
             and not warmup_done.is_set()
             and request.url.path not in SERVER_WARMUP_BYPASS_PATHS
+            and not request.url.path.startswith("/v1/realtime_worker/")
         ):
             await warmup_done.wait()
         return await call_next(request)
@@ -432,6 +464,17 @@ def create_app(server_args: ServerArgs):
     app.include_router(mesh_api.router)
     app.include_router(weights_api.router)
     app.include_router(rollout_api.router)
+
+    install_worker_reservation_routes(
+        app,
+        WorkerReservationRegistry(
+            worker_epoch=resolve_worker_epoch(),
+            capacity=server_args.realtime_max_sessions_per_worker,
+            max_consumed_age_s=getattr(
+                server_args, "realtime_worker_max_consumed_age_s", 0.0
+            ),
+        ),
+    )
 
     app.state.server_args = server_args
     return app

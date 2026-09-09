@@ -23,6 +23,7 @@ from sglang.multimodal_gen.configs.pipeline_configs.helios import (
 from sglang.multimodal_gen.configs.pipeline_configs.hunyuan import FastHunyuanConfig
 from sglang.multimodal_gen.configs.pipeline_configs.lingbot_world import (
     LingBotWorldCausalDMDConfig,
+    LingBotWorldV2CausalDMDConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.longcat_image import (
     LongCatImagePipelineConfig,
@@ -138,6 +139,31 @@ def _from_dict_without_model_resolution(
         _mock_cuda_platform(),
     ):
         return ServerArgs.from_dict(kwargs)
+
+
+class TestRealtimeSessionTimeoutArgs(unittest.TestCase):
+    def test_zero_disables_direct_session_timeouts(self):
+        args = _from_dict_without_model_resolution(
+            {
+                "model_path": "/fake",
+                "realtime_session_idle_timeout_s": 0,
+                "realtime_session_max_lifetime_s": 0,
+            }
+        )
+
+        self.assertEqual(args.realtime_session_idle_timeout_s, 0)
+        self.assertEqual(args.realtime_session_max_lifetime_s, 0)
+
+    def test_negative_session_timeouts_are_rejected(self):
+        for field in (
+            "realtime_session_idle_timeout_s",
+            "realtime_session_max_lifetime_s",
+        ):
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(ValueError, "must be >= 0"),
+            ):
+                _from_dict_without_model_resolution({"model_path": "/fake", field: -1})
 
 
 class TestServerArgsPathExpansion(unittest.TestCase):
@@ -2565,6 +2591,19 @@ class TestOffloadDefaults(unittest.TestCase):
 
         self.assertFalse(args.enable_torch_compile)
 
+    def test_speed_mode_cuda_graph_does_not_enable_torch_compile(self):
+        args = self._from_dict_with_pipeline_config(
+            QwenImagePipelineConfig(),
+            kwargs={
+                "model_path": "Qwen/Qwen-Image",
+                "performance_mode": "speed",
+                "enable_cuda_graph": True,
+            },
+        )
+
+        self.assertTrue(args.enable_cuda_graph)
+        self.assertFalse(args.enable_torch_compile)
+
     def test_speed_mode_preserves_explicit_torch_compile_setting(self):
         for enabled in (False, True):
             with self.subTest(enabled=enabled):
@@ -2875,6 +2914,17 @@ class TestModelIdResolution(unittest.TestCase):
         self.assertIsNotNone(info)
 
         self.assertIs(info.pipeline_config_cls, QwenImagePipelineConfig)
+
+    def test_model_id_accepts_full_hf_repo_id(self):
+        # Services often pass the full model revision string through the
+        # coordinator. It should resolve just like the short repo name.
+        info = _get_config_info(
+            "/data/cached-lingbot2",
+            model_id="robbyant/lingbot-world-v2-14b-causal-fast-diffusers",
+        )
+        self.assertIsNotNone(info)
+
+        self.assertIs(info.pipeline_config_cls, LingBotWorldV2CausalDMDConfig)
 
     def test_model_id_works_after_tilde_expansion(self):
         # simulate the full flow: user passes ~/..., engine expands and resolves
@@ -3215,6 +3265,78 @@ class TestDisaggTransferBackendArgs(unittest.TestCase):
 
         args, _unknown = parser.parse_known_args(argv)
         self.assertEqual(args.disagg_transfer_backend, "mock")
+
+
+class TestRealtimeVAEArgs(unittest.TestCase):
+    def test_defaults_preserve_local_exact_decoder(self):
+        args = _from_dict_without_model_resolution({"model_path": "/fake"})
+
+        self.assertEqual(args.realtime_vae_backend, "local")
+        self.assertEqual(args.realtime_vae_transport, "auto")
+        self.assertIsNone(args.realtime_vae_worker_url)
+
+    def test_remote_backend_cli_args_are_explicit(self):
+        parser = FlexibleArgumentParser()
+        ServerArgs.add_cli_args(parser)
+        args, _unknown = parser.parse_known_args(
+            [
+                "--model-path",
+                "/fake",
+                "--realtime-vae-backend",
+                "exact_remote",
+                "--realtime-vae-worker-url",
+                "ws://127.0.0.1:18081/ws",
+                "--realtime-vae-transport",
+                "shared_memory",
+                "--realtime-vae-shared-memory-dir",
+                "/dev/shm/test-realtime-vae",
+            ]
+        )
+
+        self.assertEqual(args.realtime_vae_backend, "exact_remote")
+        self.assertEqual(args.realtime_vae_worker_url, "ws://127.0.0.1:18081/ws")
+        self.assertEqual(args.realtime_vae_transport, "shared_memory")
+        self.assertEqual(
+            args.realtime_vae_shared_memory_dir,
+            "/dev/shm/test-realtime-vae",
+        )
+
+    def test_worker_url_is_rejected_for_local_backend(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "realtime_vae_worker_url requires realtime_vae_backend",
+        ):
+            _from_dict_without_model_resolution(
+                {
+                    "model_path": "/fake",
+                    "realtime_vae_backend": "local",
+                    "realtime_vae_worker_url": "ws://127.0.0.1:18081/ws",
+                }
+            )
+
+    def test_remote_transport_is_rejected_for_local_backend(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "realtime_vae_transport.*require realtime_vae_backend",
+        ):
+            _from_dict_without_model_resolution(
+                {
+                    "model_path": "/fake",
+                    "realtime_vae_backend": "local",
+                    "realtime_vae_transport": "shared_memory",
+                }
+            )
+
+    def test_remote_backend_with_worker_url_is_accepted(self):
+        args = _from_dict_without_model_resolution(
+            {
+                "model_path": "/fake",
+                "realtime_vae_backend": "taehv_remote",
+                "realtime_vae_worker_url": "ws://127.0.0.1:18081/ws",
+            }
+        )
+
+        self.assertEqual(args.realtime_vae_backend, "taehv_remote")
 
 
 class TestNcclNvlsArgs(unittest.TestCase):

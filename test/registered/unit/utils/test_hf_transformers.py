@@ -7,6 +7,7 @@ context length, GGUF detection, etc.) that don't require actual model files.
 import inspect
 import tempfile
 import unittest
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -164,6 +165,38 @@ class TestImageProcessorKwargsPatch(unittest.TestCase):
         self.assertEqual(first, {"images": "first", "accepted": True})
         self.assertEqual(second, {"images": "second", "accepted": False})
         self.assertEqual(signature.call_count, 1)
+
+
+class TestApplyAllCompatibilityPatches(unittest.TestCase):
+    def test_transformers_v4_skips_v5_only_patches(self):
+        import transformers
+
+        import sglang.srt.utils.hf_transformers_patches as compat
+
+        v5_patch_names = (
+            "_patch_flash_attn_availability",
+            "_patch_rope_parameters_validation",
+            "_patch_removed_symbols",
+            "_patch_image_processor_kwargs",
+            "_patch_image_process_cuda_tensor",
+            "_patch_nemotron_h_pattern",
+            "_ensure_clean_up_tokenization_compat",
+            "_ensure_is_torch_fx_available_compat",
+        )
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(compat, "_applied", False))
+            stack.enter_context(patch.object(transformers, "__version__", "4.56.2"))
+            ci_patch = stack.enter_context(
+                patch.object(compat, "patch_is_base_mistral_in_ci")
+            )
+            v5_patches = {
+                name: stack.enter_context(patch.object(compat, name))
+                for name in v5_patch_names
+            }
+            compat.apply_all()
+            ci_patch.assert_called_once_with()
+            for mocked_patch in v5_patches.values():
+                mocked_patch.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

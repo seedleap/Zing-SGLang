@@ -112,11 +112,22 @@ class RealtimeTextEncodingStage(TextEncodingStage):
     def component_uses(
         self, server_args: ServerArgs, stage_name: str | None = None
     ) -> list[ComponentUse]:
-        # Cache hits return before encode_text reaches the declared use site.
-        return [
+        # Cached prompts do not enter the encoder component use site.
+        uses = [
             replace(use, start_at_stage_entry=False)
             for use in super().component_uses(server_args, stage_name)
         ]
+        if server_args.text_encoder_cpu_offload:
+            return [
+                replace(
+                    use,
+                    preferred_ready_after_request=False,
+                    allow_prefetch=False,
+                    memory_intensive=True,
+                )
+                for use in uses
+            ]
+        return uses
 
     def _make_cache_key(self, batch: Req) -> tuple[Any, ...]:
         return (

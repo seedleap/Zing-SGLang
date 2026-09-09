@@ -12,6 +12,11 @@
 
 --------------------------------------------------------------------------------
 
+> [!NOTE]
+> This Seedleap inference fork adds realtime serving for **Zing-0.5**, including
+> T2V/I2V generation, W/A/S/D/I/J/K/L controls, prompt updates, and causal KV
+> caching. See the [Zing-0.5 quick start](ZING.md).
+
 <p align="center">
 <a href="https://www.sglang.io/"><b>🌐 Website</b></a> |
 <a href="https://lmsys.org/blog/"><b>Blog</b></a> |
