@@ -32,6 +32,10 @@ in the published artifact.
 Zing-0.5-SGLang/
 ├── model_index.json
 ├── zing_conversion_manifest.json
+├── sglang-runtime/
+│   ├── ZING.md
+│   ├── examples/zing_0_5/
+│   └── python/sglang/
 ├── transformer/
 │   ├── config.json
 │   ├── diffusion_pytorch_model.safetensors.index.json
@@ -43,9 +47,19 @@ Zing-0.5-SGLang/
 
 ## Usage
 
-See `ZING.md` in the serving source repository. The high-memory profile uses a
-`97/9` causal attention window/sink. For a 32 GiB GPU, begin with `33/5` and CPU
-offload for the text encoder and VAE.
+The matching SGLang serving source is bundled in `sglang-runtime/`. Install it
+and start the server from the downloaded model directory:
+
+```bash
+cd sglang-runtime
+python -m pip install -e "python[diffusion]"
+
+ZING_MODEL_PATH=.. examples/zing_0_5/launch_server.sh
+```
+
+See `sglang-runtime/ZING.md` for the full launch and client guide. The
+high-memory profile uses a `97/9` causal attention window/sink. For a 32 GiB
+GPU, begin with `33/5` and CPU offload for the text encoder and VAE.
 
 The runtime creates the four-step DMD scheduler directly, so this artifact does
 not contain a `scheduler/` directory.

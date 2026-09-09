@@ -21,6 +21,9 @@ artifact.
 - Convert only from the public `seedleap/Zing-0.5` release.
 - Copy `modelcards/zing-0.5-sglang/README.md` to the artifact root and include
   the repository's Apache-2.0 `LICENSE` before checksumming.
+- Export the exact clean public source revision into `sglang-runtime/` without
+  its `.git` directory. Materialize tracked symlinks as regular files so the
+  complete ModelScope artifact remains portable and passes the symlink gate.
 - Do not use `--link-donor` for a publishable artifact.
 - Run:
 
