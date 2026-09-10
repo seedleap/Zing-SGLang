@@ -2,7 +2,6 @@
 
 import asyncio
 import io
-from contextlib import nullcontext
 from types import SimpleNamespace
 
 from starlette.datastructures import UploadFile as StarletteUploadFile
@@ -14,9 +13,7 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
     _save_upload_to_path,
     _validate_positive_int,
     build_sampling_params,
-    process_generation_batch,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
 
 
 def test_save_upload_to_path_accepts_starlette_upload_file(tmp_path):
@@ -64,38 +61,6 @@ def test_validate_positive_int_rejects_non_positive_sampling_fields():
         assert "num_frames must be positive" in exc.detail
     else:
         raise AssertionError("expected bad request")
-
-
-def test_process_generation_batch_accepts_async_raw_frame_reference(monkeypatch):
-    expected = OutputBatch(
-        raw_frame_shared_memory_ref={"kind": "raw_rgb24_frames", "version": 1}
-    )
-
-    class _SchedulerClient:
-        async def forward(self, _batch):
-            return expected
-
-    monkeypatch.setattr(openai_utils, "trace_req", lambda _trace_ctx: nullcontext())
-    monkeypatch.setattr(
-        openai_utils,
-        "log_generation_timer",
-        lambda _logger, _prompt: nullcontext(),
-    )
-    monkeypatch.setattr(
-        openai_utils,
-        "get_global_server_args",
-        lambda: SimpleNamespace(batching_max_size=1),
-    )
-
-    paths, result = asyncio.run(
-        process_generation_batch(
-            _SchedulerClient(),
-            SimpleNamespace(trace_ctx=None, prompt="test"),
-        )
-    )
-
-    assert paths == []
-    assert result is expected
 
 
 def test_build_sampling_params_resolves_size_and_explicit_dimensions(monkeypatch):

@@ -1,5 +1,4 @@
 import asyncio
-import itertools
 import pickle
 import uuid
 from types import SimpleNamespace
@@ -9,39 +8,12 @@ import pytest
 import zmq
 import zmq.asyncio
 
-from sglang.multimodal_gen.configs.sample import SamplingParams
-from sglang.multimodal_gen.runtime.entrypoints.control_requests import (
-    ReleaseRealtimeSessionReq,
-    ReplaceQueuedRealtimeReq,
-)
-from sglang.multimodal_gen.runtime.pipelines_core import Req
 from sglang.multimodal_gen.runtime.scheduler_client import (
     AsyncSchedulerClient,
     SchedulerClient,
-    _select_replica,
     run_zeromq_broker,
 )
 from sglang.multimodal_gen.runtime.server_args import MAX_SCHEDULER_RPC_TIMEOUT_S
-
-
-def test_realtime_release_and_rewrite_stay_on_the_generation_replica():
-    generation = Req(
-        sampling_params=SamplingParams(),
-        realtime_session_id="session-with-persistent-kv",
-    )
-    release = ReleaseRealtimeSessionReq(session_id=generation.realtime_session_id)
-    rewrite = ReplaceQueuedRealtimeReq(
-        session_id=generation.realtime_session_id,
-        generation_id="generation-1",
-        chunk_index=1,
-        request_id="request-1",
-        replacement=generation,
-    )
-    counter = itertools.count()
-    owner = _select_replica([generation], 4, counter)
-    for request in (release, rewrite, release, rewrite):
-        next(counter)  # Other requests must not change the session's replica.
-        assert _select_replica(request, 4, counter) == owner
 
 
 def test_sync_scheduler_client_converts_configured_seconds_to_milliseconds():

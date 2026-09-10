@@ -80,10 +80,6 @@ from sglang.multimodal_gen.runtime.realtime.states import (
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.nvtx_pytorch_hooks import maybe_nvtx_range
-from sglang.multimodal_gen.runtime.utils.realtime_trace import (
-    realtime_trace_span,
-    tensor_trace_metadata,
-)
 
 MINWM_ACTION_HISTORY_CACHE = "minwm_action_history"
 MINWM_INITIAL_NOISE_CACHE = "minwm_initial_noise"
@@ -1782,23 +1778,6 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             module=self.transformer,
             phase=component_name,
         ):
-            if getattr(batch, "realtime_trace_id", None):
-                with realtime_trace_span(
-                    logger,
-                    batch,
-                    "server.model_denoise_complete",
-                    component="minwm_denoising",
-                    input_tensor=batch.latents,
-                    chunk_index=batch.block_idx,
-                    event_id=getattr(batch, "realtime_event_id", None),
-                    stage=self.__class__.__name__,
-                    num_inference_steps=getattr(batch, "num_inference_steps", None),
-                ) as trace_span:
-                    result = self._forward_impl(batch, server_args)
-                    trace_span.add_fields(
-                        **tensor_trace_metadata(result.latents, prefix="latents"),
-                    )
-                    return result
             return self._forward_impl(batch, server_args)
 
     def _forward_impl(self, batch: Req, server_args: ServerArgs) -> Req:

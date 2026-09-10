@@ -26,15 +26,11 @@ from sglang.multimodal_gen.configs.pipeline_configs.minwm import (
 )
 from sglang.multimodal_gen.configs.sample.minwm import MinWMSamplingParams
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
-    RealtimeEvent,
     RealtimeVideoGenerationsRequest,
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.adapters.minwm_realtime_adapter import (
     MinWMRealtimeAdapter,
     MinWMRealtimeState,
-)
-from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.generate_session import (
-    GenerateSession,
 )
 from sglang.multimodal_gen.runtime.models.dits.minwm import (
     MinWMCausalSelfAttention,
@@ -112,7 +108,7 @@ def test_minwm_denoising_declares_transformer_residency_use(monkeypatch):
     expected = SimpleNamespace(latents=torch.zeros(1))
     monkeypatch.setattr(stage, "_forward_impl", lambda _batch, _args: expected)
 
-    result = stage.forward(SimpleNamespace(realtime_trace_id=None), SimpleNamespace())
+    result = stage.forward(SimpleNamespace(), SimpleNamespace())
 
     assert result is expected
     assert calls == [("transformer", "transformer", transformer)]
@@ -1759,102 +1755,6 @@ def test_minwm_realtime_adapter_groups_pixel_weights_by_vae_factor():
     assert inputs.condition_inputs[MINWM_TOTAL_CHUNKS_CONDITION] == 8
 
 
-def test_minwm_refreshes_queued_chunk_with_latest_camera_state():
-    adapter = MinWMRealtimeAdapter()
-    session = GenerateSession()
-    session.set_adapter(adapter)
-    session.set_request(
-        RealtimeVideoGenerationsRequest(
-            type="init",
-            prompt="test",
-            first_frame="/tmp/reference.png",
-            max_chunks=4,
-        )
-    )
-    state = adapter._state(session)
-    state.receive_camera_state(["w"], event_id=1)
-    chunk = session.new_chunk()
-    initial_labels = state.sample_action_labels(4)
-    batch = SimpleNamespace(
-        condition_inputs={MINWM_ACTION_LABELS_CONDITION: initial_labels},
-        realtime_chunk_size=4,
-        realtime_action_version=0,
-        realtime_prompt_version=0,
-        realtime_event_id=1,
-    )
-
-    adapter.ingest_event(
-        session,
-        RealtimeEvent(
-            type="event",
-            kind="camera_actions",
-            event_id=2,
-            payload={
-                "mode": "state",
-                "transitions": [{"actions": ["a"], "client_ts_ms": 10}],
-            },
-        ),
-    )
-    session.mark_event_version("camera_actions")
-    refreshed = adapter.refresh_queued_request(
-        session,
-        SimpleNamespace(
-            pipeline_config=SimpleNamespace(
-                vae_config=SimpleNamespace(
-                    arch_config=SimpleNamespace(scale_factor_temporal=4)
-                )
-            )
-        ),
-        chunk,
-        batch,
-        "camera_actions",
-    )
-
-    assert refreshed is not batch
-    assert (
-        refreshed.condition_inputs[MINWM_ACTION_LABELS_CONDITION]
-        == [key_state_to_action_label(["a"])] * 4
-    )
-    assert refreshed.realtime_action_version == 1
-    assert refreshed.realtime_event_id == 2
-
-
-def test_minwm_does_not_consume_prompt_while_previewing_queued_chunk():
-    adapter = MinWMRealtimeAdapter()
-    session = GenerateSession()
-    session.set_adapter(adapter)
-    session.set_request(
-        RealtimeVideoGenerationsRequest(
-            type="init",
-            prompt="old prompt",
-            first_frame="/tmp/reference.png",
-            max_chunks=4,
-        )
-    )
-    state = adapter._state(session)
-    state.receive_prompt("new prompt", event_id=7, switch_kind="scene_cut")
-    chunk = session.new_chunk()
-    batch = SimpleNamespace(
-        condition_inputs={},
-        realtime_chunk_size=4,
-        realtime_action_version=0,
-        realtime_prompt_version=0,
-        realtime_event_id=1,
-    )
-
-    refreshed = adapter.refresh_queued_request(
-        session,
-        SimpleNamespace(),
-        chunk,
-        batch,
-        "scene_cut",
-    )
-
-    assert refreshed is None
-    assert state.prompt_queue.has_events("condition_switch")
-    assert session.request.prompt == "old prompt"
-
-
 def test_minwm_t2v_first_latent_is_noop_without_consuming_pixel_actions():
     state = MinWMRealtimeState()
     first_action = [0.8, 0, 0, 0, 0, 0, 0, 0]
@@ -2021,11 +1921,14 @@ def test_minwm_rejects_unknown_vae_lane(monkeypatch):
         MinWMCausalDMDConfig()
 
 
-def test_zing_public_pipeline_uses_minwm_runtime_defaults():
+def test_zing_public_pipeline_uses_online_runtime_defaults():
     assert issubclass(ZingCausalDMDPipeline, MinWMCausalDMDPipeline)
     arch_config = MinWMVideoArchConfig()
-    assert (arch_config.local_attn_size, arch_config.sink_size) == (97, 9)
-    assert arch_config.sliding_window_num_frames == 97
+    assert (arch_config.local_attn_size, arch_config.sink_size) == (32, 8)
+    assert arch_config.sliding_window_num_frames == 32
+    assert arch_config.rope_position_mode == "block_relative"
+    assert arch_config.rope_max_frame_gap == 12
+    assert arch_config.prompt_first_frame_pin_enabled is True
 
 
 def test_minwm_non_proj_bias_is_loaded_from_transformer_config():

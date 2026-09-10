@@ -52,7 +52,6 @@ from sglang.multimodal_gen.runtime.entrypoints.utils import (
     post_process_sample,
     save_outputs,
 )
-from sglang.multimodal_gen.runtime.ipc_array import is_local_endpoint
 from sglang.multimodal_gen.runtime.managers.memory_managers.auto_residency import (
     DefaultWorkload,
     WarmupMemoryRecord,
@@ -80,10 +79,7 @@ from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.post_training.gpu_worker_post_training_mixin import (
     GPUWorkerPostTrainingMixin,
 )
-from sglang.multimodal_gen.runtime.realtime.session import (
-    RealtimeSessionCache,
-)
-from sglang.multimodal_gen.runtime.realtime_vae_config import LOCAL_VAE_BACKEND
+from sglang.multimodal_gen.runtime.realtime.session import RealtimeSessionCache
 from sglang.multimodal_gen.runtime.server_args import PortArgs, ServerArgs
 from sglang.multimodal_gen.runtime.utils.common import set_cuda_arch, set_musa_arch
 from sglang.multimodal_gen.runtime.utils.logging_utils import (
@@ -97,7 +93,6 @@ from sglang.multimodal_gen.runtime.utils.perf_logger import (
 from sglang.multimodal_gen.runtime.utils.profiler import maybe_record_function
 from sglang.multimodal_gen.runtime.utils.realtime_video import (
     RAW_RGB_CONTENT_TYPE,
-    AsyncRawRGBFrameMaterializer,
     build_raw_rgb_frame_batches,
 )
 from sglang.multimodal_gen.runtime.utils.trace_wrapper import (
@@ -243,15 +238,10 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
 
         self.cfg_group = get_cfg_group()
         self.cfg_cpu_group = self.cfg_group.cpu_group
-        idle_timeout_s = server_args.realtime_session_idle_timeout_s
         self._realtime_sessions = RealtimeSessionCache(
-            max_sessions=server_args.realtime_max_sessions_per_worker,
-            stale_after_s=(
-                None if idle_timeout_s == 0 else max(30.0, idle_timeout_s * 2)
-            ),
+            max_sessions=server_args.realtime_max_sessions_per_worker
         )
         self.memory_occupation: MemoryOccupationController | None = None
-        self._async_raw_frame_materializer: AsyncRawRGBFrameMaterializer | None = None
         # per-rank memory measurements of server warmup forwards; consumed by
         # the auto-residency placement decision before the server turns ready
         self._auto_residency_warmup_records: list[WarmupMemoryRecord] = []
@@ -284,9 +274,6 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
                 }
             )
 
-        materializer = self._async_raw_frame_materializer
-        if materializer is not None:
-            materializer.cancel_session(session_id)
         released = self._realtime_sessions.release(session_id)
         if released:
             has_persistent_pool = any(
@@ -296,12 +283,6 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
             if torch.cuda.is_initialized() and not has_persistent_pool:
                 torch.cuda.empty_cache()
         return OutputBatch(output={"released": released, "session_id": session_id})
-
-    def close_async_output_materializer(self) -> None:
-        materializer = self._async_raw_frame_materializer
-        if materializer is not None:
-            materializer.close()
-            self._async_raw_frame_materializer = None
 
     def _configure_persistent_torch_compile_cache(self) -> None:
         """Persist torch.compile's Inductor/Triton cache across restarts"""
@@ -917,82 +898,20 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
     ) -> None:
         if not self.is_output_rank:
             return
-        if isinstance(output_batch.realtime_latents, torch.Tensor):
-            output_batch.realtime_latents = (
-                output_batch.realtime_latents.detach().contiguous().cpu()
-            )
         if output_batch.output is not None:
             output_batch.raw_frame_content_type = RAW_RGB_CONTENT_TYPE
-            if not self._try_materialize_raw_frames_async(output_batch, req):
-                (
-                    output_batch.raw_frame_batches,
-                    output_batch.raw_frame_metadata,
-                ) = build_raw_rgb_frame_batches(
-                    output_batch.output,
-                    req,
-                    output_batch,
-                    post_process_sample,
-                )
-                output_batch.output = None
+            (
+                output_batch.raw_frame_batches,
+                output_batch.raw_frame_metadata,
+            ) = build_raw_rgb_frame_batches(
+                output_batch.output,
+                req,
+                output_batch,
+                post_process_sample,
+            )
+            output_batch.output = None
         output_batch.audio = None
         output_batch.audio_sample_rate = None
-
-    def _try_materialize_raw_frames_async(
-        self,
-        output_batch: OutputBatch,
-        req: Req,
-    ) -> bool:
-        """Use the local single-GPU TAEHV asynchronous RGB24 transport when safe."""
-        output = output_batch.output
-        vae_config = getattr(self.server_args.pipeline_config, "vae_config", None)
-        if not (
-            self.rank == 0
-            and getattr(self.server_args, "num_gpus", 1) == 1
-            and getattr(self.server_args, "realtime_vae_backend", None)
-            == LOCAL_VAE_BACKEND
-            and is_local_endpoint(getattr(self.server_args, "scheduler_endpoint", ""))
-            and getattr(vae_config, "taehv_checkpoint_path", None)
-            and not getattr(req, "is_warmup", False)
-            and bool(getattr(req, "realtime_session_id", None))
-            and bool(getattr(req, "realtime_generation_id", None))
-            and not req.enable_frame_interpolation
-            and not req.enable_upscaling
-            and isinstance(output, torch.Tensor)
-            and output.device.type == "cuda"
-            and output.dim() == 5
-            and int(output.shape[1]) == 3
-        ):
-            return False
-
-        materializer = getattr(self, "_async_raw_frame_materializer", None)
-        if materializer is None:
-            materializer = AsyncRawRGBFrameMaterializer()
-            self._async_raw_frame_materializer = materializer
-        started = time.perf_counter()
-        try:
-            reference, metadata = materializer.enqueue(
-                output,
-                request_id=req.request_id,
-                chunk_index=req.block_idx,
-                session_id=req.realtime_session_id,
-                generation_id=req.realtime_generation_id,
-            )
-        except Exception:
-            logger.warning(
-                "async raw RGB transport unavailable; using synchronous fallback",
-                exc_info=True,
-            )
-            return False
-
-        output_batch.raw_frame_shared_memory_ref = reference
-        output_batch.raw_frame_metadata = metadata
-        output_batch.output = None
-        if output_batch.metrics is not None:
-            output_batch.metrics.record_stage(
-                "GPUWorker.raw_frame_async_enqueue",
-                time.perf_counter() - started,
-            )
-        return True
 
     def _materialize_file_path_transport(
         self,
@@ -1689,11 +1608,6 @@ def run_scheduler_process(
     finally:
         # Clean up resources to speed up shutdown
         if "scheduler" in locals():
-            close_materializer = getattr(
-                scheduler.worker, "close_async_output_materializer", None
-            )
-            if close_materializer is not None:
-                close_materializer()
             del scheduler
         gc.collect()
         if torch.cuda.is_initialized():

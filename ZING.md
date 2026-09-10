@@ -10,9 +10,6 @@ through SGLang's realtime WebSocket API and supports:
 - bounded causal KV caches for long sessions;
 - WebP, JPEG, or lossless RGB frame transport.
 
-The internal implementation keeps the historical `MinWM*` Python class names for
-checkpoint compatibility. Public model names and documentation use `Zing-0.5`.
-
 ## Requirements
 
 - Linux and an NVIDIA CUDA GPU;
@@ -29,6 +26,8 @@ From this repository:
 
 ```bash
 python -m pip install -e "python[diffusion]"
+python -m pip install \
+  "taehv @ git+https://github.com/madebyollin/taehv.git@093b918971d59001a0bad6dfd6e0409b5e1752cf"
 ```
 
 ## Download the serving artifact
@@ -37,6 +36,10 @@ python -m pip install -e "python[diffusion]"
 modelscope download \
   --model seedleap/Zing-0.5-SGLang \
   --local_dir ./models/Zing-0.5-SGLang
+
+curl -L \
+  https://raw.githubusercontent.com/madebyollin/taehv/093b918971d59001a0bad6dfd6e0409b5e1752cf/taew2_2.pth \
+  -o ./models/Zing-0.5-SGLang/taew2_2.pth
 ```
 
 The serving artifact is a sharded safetensors conversion of the public
@@ -45,7 +48,9 @@ and tensor summary without recording private filesystem paths.
 
 ## Launch
 
-The bundled launcher selects the published high-memory profile by default:
+The bundled launcher uses the local TAEHV decoder and the online cache/RoPE
+defaults (`block_relative`, gap `12`, window `32`, sink `8`, and first-frame
+prompt pinning):
 
 ```bash
 ZING_MODEL_PATH=./models/Zing-0.5-SGLang \
@@ -70,11 +75,14 @@ python -m sglang.multimodal_gen.runtime.launch_server \
   --pipeline-class-name ZingCausalDMDPipeline \
   --attention-backend fa \
   --performance-mode speed \
+  --vae-config.taehv-checkpoint-path ./models/Zing-0.5-SGLang/taew2_2.pth \
+  --realtime-causal-kv-cache-num-frames 32 \
+  --realtime-causal-sink-size 8 \
   --host 0.0.0.0 \
   --port 30000
 ```
 
-For a 32 GiB GPU, begin with CPU offload and the `33/5` cache profile:
+For a 32 GiB GPU, begin with CPU offload:
 
 ```bash
 python -m sglang.multimodal_gen.runtime.launch_server \
@@ -84,8 +92,9 @@ python -m sglang.multimodal_gen.runtime.launch_server \
   --performance-mode speed \
   --text-encoder-cpu-offload true \
   --vae-cpu-offload true \
-  --realtime-causal-kv-cache-num-frames 33 \
-  --realtime-causal-sink-size 5 \
+  --vae-config.taehv-checkpoint-path ./models/Zing-0.5-SGLang/taew2_2.pth \
+  --realtime-causal-kv-cache-num-frames 32 \
+  --realtime-causal-sink-size 8 \
   --host 0.0.0.0 \
   --port 30000
 ```
@@ -97,14 +106,11 @@ python examples/zing_0_5/client.py \
   --prompt "A first-person walk through a misty pine forest at sunrise" \
   --action w \
   --chunks 4 \
-  --window 33 \
-  --sink 5 \
   --output outputs/forest
 ```
 
-On an 80 GiB or larger GPU, omit `--window` and `--sink` to use the published
-`97/9` profile. Full-history attention remains available with `--window -1
---sink 0`, but its memory use grows with the rollout.
+The client inherits the server's `32/8` cache defaults unless `--window` or
+`--sink` is explicitly supplied.
 
 For I2V, add a local PNG, JPEG, or WebP image:
 

@@ -10,8 +10,6 @@ import zmq.asyncio
 from sglang.multimodal_gen.runtime.entrypoints.control_requests import (
     ListLorasReq,
     MergeLoraWeightsReq,
-    ReleaseRealtimeSessionReq,
-    ReplaceQueuedRealtimeReq,
     SetLoraReq,
     ShutdownReq,
     UnmergeLoraWeightsReq,
@@ -123,8 +121,6 @@ def _session_key(batch: Any) -> str | None:
     for req in reqs:
         if isinstance(req, Req) and req.realtime_session_id:
             return req.realtime_session_id
-        if isinstance(req, (ReleaseRealtimeSessionReq, ReplaceQueuedRealtimeReq)):
-            return req.session_id
     return None
 
 

@@ -206,7 +206,6 @@ class MiniMaxH3AdalnHostTier:
 
         Runs on the tier's copy stream; the caller fences the compute stream
         afterwards (fence_gpu_reads) and only then flips plan_lengths.
-        Without a copy stream, copies complete synchronously before returning.
         """
         with self._stream_ctx():
             for key, slot in assignments.items():
@@ -214,10 +213,10 @@ class MiniMaxH3AdalnHostTier:
                     row = self._slab[page]
                     block_params[slot, index].copy_(
                         row[: self.block_numel].view(self.num_layers, self.block_width),
-                        non_blocking=self._stream is not None,
+                        non_blocking=True,
                     )
                     final_params[slot, index].copy_(
-                        row[self.block_numel :], non_blocking=self._stream is not None
+                        row[self.block_numel :], non_blocking=True
                     )
 
     def store_group(
@@ -271,11 +270,9 @@ class MiniMaxH3AdalnHostTier:
                     row = self._slab[page]
                     row[: self.block_numel].view(
                         self.num_layers, self.block_width
-                    ).copy_(
-                        block_params[slot, index], non_blocking=self._stream is not None
-                    )
+                    ).copy_(block_params[slot, index], non_blocking=True)
                     row[self.block_numel :].copy_(
-                        final_params[slot, index], non_blocking=self._stream is not None
+                        final_params[slot, index], non_blocking=True
                     )
                 staged[key] = _HostPlan(pages=pages, refcount=1)
         self.synchronize()

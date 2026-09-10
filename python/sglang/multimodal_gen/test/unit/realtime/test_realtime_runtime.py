@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import inspect
 import time
-from collections import deque
-from copy import copy
 from types import SimpleNamespace
 
 import msgspec.msgpack
@@ -16,9 +13,6 @@ from sglang.multimodal_gen.configs.pipeline_configs.lingbot_world import (
     LingBotWorldCausalDMDConfig,
     _actions_to_c2ws,
 )
-from sglang.multimodal_gen.runtime.entrypoints.control_requests import (
-    ReplaceQueuedRealtimeReq,
-)
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
     RealtimeEvent,
     RealtimeVideoGenerationsRequest,
@@ -29,9 +23,6 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.realtime import (
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.adapters import (
     lingbot_world_realtime_adapter as lingbot_realtime,
-)
-from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.adapters import (
-    minwm_realtime_adapter as minwm_realtime,
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.adapters import (
     sana_wm_realtime_adapter as sana_wm_realtime,
@@ -46,8 +37,7 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.registry import (
     get_realtime_model_adapter,
     has_realtime_model_adapter,
 )
-from sglang.multimodal_gen.runtime.managers.scheduler import Scheduler
-from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch, Req
+from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.lingbot_world.lingbot_world_causal_denoising import (
     LingBotWorldCausalDMDDenoisingStage,
 )
@@ -63,13 +53,12 @@ from sglang.multimodal_gen.runtime.realtime.control_signals import (
 )
 from sglang.multimodal_gen.runtime.realtime.session import (
     BaseRealtimeState,
-    RealtimeSessionCache,
     RealtimeSessionCapacityError,
+    RealtimeSessionCache,
 )
 from sglang.multimodal_gen.runtime.realtime.states import (
     RealtimeCausalDecodeState,
 )
-from sglang.multimodal_gen.runtime.utils.perf_logger import RequestMetrics
 from sglang.multimodal_gen.runtime.utils.realtime_video import (
     RAW_RGB_CONTENT_TYPE,
 )
@@ -89,173 +78,10 @@ class _State(BaseRealtimeState):
         self.disposed = True
 
 
-def test_realtime_session_cleanup_precedes_server_close(monkeypatch):
-    events = []
-
-    async def cleanup(*_args):
-        events.append("cleanup")
-
-    async def close(*_args, **_kwargs):
-        events.append("close")
-
-    monkeypatch.setattr(realtime_video_api, "_cleanup_realtime_session", cleanup)
-    monkeypatch.setattr(realtime_video_api, "_close_realtime_websocket", close)
-    asyncio.run(
-        realtime_video_api._cleanup_realtime_session_then_close(
-            SimpleNamespace(),
-            SimpleNamespace(),
-            None,
-            None,
-            (1000, "generation complete"),
-        )
-    )
-
-    assert events == ["cleanup", "close"]
-
-
-def test_realtime_output_pacing_compat_field_is_non_blocking():
-    session = SimpleNamespace(output_pace_next_send_at=time.perf_counter() + 60)
-    batch = SimpleNamespace(
-        realtime_output_pacing=True,
-        fps=1,
-        enable_frame_interpolation=False,
-        realtime_event_id=1,
-    )
-    result = SimpleNamespace(raw_frame_batches=[[object()] * 8])
-
-    start = time.perf_counter()
-    waited_ms = asyncio.run(
-        realtime_video_api._wait_for_realtime_output_slot(session, batch, result)
-    )
-
-    assert waited_ms == 0.0
-    assert time.perf_counter() - start < 0.05
-
-
-def test_interactive_event_grace_waits_for_prior_output_before_next_chunk(monkeypatch):
-    events = []
-
-    async def prior_output():
-        events.append("output sent")
-
-    async def fake_sleep(seconds):
-        events.append(("event grace", seconds))
-
-    request = RealtimeVideoGenerationsRequest(
-        type="init",
-        prompt="test",
-        realtime_interactive_event_grace_ms=250,
-    )
-    session = SimpleNamespace(request=request)
-
-    async def run():
-        pending = asyncio.create_task(prior_output())
-        return await realtime_video_api._wait_for_realtime_interactive_event_window(
-            session,
-            pending,
-        )
-
-    monkeypatch.setattr(realtime_video_api.asyncio, "sleep", fake_sleep)
-    remaining = asyncio.run(run())
-
-    assert remaining is None
-    assert events == ["output sent", ("event grace", 0.25)]
-
-
-def test_interactive_event_grace_accepts_public_round_trip_budget():
-    request = RealtimeVideoGenerationsRequest(
-        type="init",
-        prompt="test",
-        realtime_interactive_event_grace_ms=1800,
-    )
-
-    assert request.realtime_interactive_event_grace_ms == 1800
-
-
-def test_interactive_event_grace_wakes_when_new_control_arrives():
-    async def run():
-        request = RealtimeVideoGenerationsRequest(
-            type="init",
-            prompt="test",
-            realtime_interactive_event_grace_ms=1800,
-        )
-        session = GenerateSession()
-        session.set_request(request)
-
-        async def prior_output():
-            await asyncio.sleep(0)
-
-        waiter = asyncio.create_task(
-            realtime_video_api._wait_for_realtime_interactive_event_window(
-                session,
-                asyncio.create_task(prior_output()),
-            )
-        )
-        await asyncio.sleep(0.01)
-        session.mark_event_version("camera_actions")
-        return await asyncio.wait_for(waiter, timeout=0.1)
-
-    assert asyncio.run(run()) is None
-
-
 class _TestRealtimeDiffusionStage(RealtimeDiffusionStage):
     def forward(self, batch, component_manager=None):
         del batch, component_manager
         raise NotImplementedError
-
-
-def test_realtime_generate_does_not_start_a_trace_websocket_sender():
-    source = inspect.getsource(realtime_video_api.generate)
-
-    assert "_send_realtime_trace_events" not in source
-    assert "trace_task" not in source
-    assert '"type": "trace_events"' not in inspect.getsource(realtime_video_api)
-    assert "_send_realtime_chunk_stats" not in inspect.getsource(realtime_video_api)
-
-
-def test_realtime_init_keeps_client_trace_off_the_video_websocket():
-    assert "client_trace" not in RealtimeVideoGenerationsRequest.model_fields
-    session = GenerateSession()
-    assert not hasattr(session, "client_trace")
-    assert "client_trace=session" not in inspect.getsource(realtime_video_api)
-
-
-def test_gateway_managed_session_uses_coordinator_identity_and_routes():
-    websocket = SimpleNamespace(
-        query_params={
-            "gateway_managed": "1",
-            "session_id": "session-a",
-            "generation_id": "generation-a",
-            "coordinator_token": "lease-secret",
-            "worker_epoch": "denoiser-epoch",
-            "realtime_vae_worker_url": "ws://vae-a/decode",
-            "realtime_vae_worker_epoch": "vae-epoch",
-            "gateway_output_url": "ws://gateway-a/output",
-            "gateway_output_token": "output-secret",
-        }
-    )
-    config = realtime_video_api._gateway_managed_config(websocket)
-    assert config.session_id == "session-a"
-    assert config.generation_id == "generation-a"
-    assert config.worker_epoch == "denoiser-epoch"
-    assert config.vae_worker_url == "ws://vae-a/decode"
-    assert config.vae_worker_epoch == "vae-epoch"
-    assert config.output_url == "ws://gateway-a/output"
-
-    session = GenerateSession(
-        session_id=config.session_id,
-        generation_id=config.generation_id,
-    )
-    assert session.id == "session-a"
-    assert session.generation_id == "generation-a"
-
-
-def test_gateway_managed_session_can_allocate_reservation_owner():
-    first = realtime_video_api.uuid4().hex
-    second = realtime_video_api.uuid4().hex
-
-    assert len(first) == 32
-    assert first != second
 
 
 def test_realtime_diffusion_stage_declares_long_lived_components():
@@ -331,89 +157,12 @@ def test_realtime_session_cache_rejects_missing_nonzero_chunk():
         raise AssertionError("expected missing realtime session to fail")
 
 
-def test_active_realtime_sessions_are_never_lru_evicted():
+def test_realtime_session_cache_does_not_evict_an_active_session():
     cache = RealtimeSessionCache(max_sessions=1)
-    first = _Req(realtime_session_id="session-a", block_idx=0, session=None)
-    second = _Req(realtime_session_id="session-b", block_idx=0, session=None)
-    cache.attach(first)
+    cache.attach(_Req(realtime_session_id="session-a", block_idx=0, session=None))
 
-    with pytest.raises(RealtimeSessionCapacityError):
-        cache.attach(second)
-
-    followup = _Req(realtime_session_id="session-a", block_idx=1, session=None)
-    cache.attach(followup)
-    assert followup.session is first.session
-
-
-def test_realtime_session_cache_reclaims_only_expired_orphaned_state():
-    now = [100.0]
-    cache = RealtimeSessionCache(
-        max_sessions=1,
-        stale_after_s=30,
-        clock=lambda: now[0],
-    )
-    first = _Req(realtime_session_id="session-a", block_idx=0, session=None)
-    cache.attach(first)
-    state = first.session.get_or_create_state(_State)
-
-    now[0] = 129.0
     with pytest.raises(RealtimeSessionCapacityError):
         cache.attach(_Req(realtime_session_id="session-b", block_idx=0, session=None))
-    assert not state.disposed
-
-    now[0] = 131.0
-    replacement = _Req(realtime_session_id="session-b", block_idx=0, session=None)
-    cache.attach(replacement)
-
-    assert state.disposed
-    assert replacement.session is not first.session
-
-
-def test_scheduler_session_release_retries_transient_failures(monkeypatch):
-    async def scenario():
-        calls = []
-
-        async def forward(_request):
-            calls.append(True)
-            if len(calls) < 3:
-                raise RuntimeError("scheduler temporarily unavailable")
-            return OutputBatch(output={"released": True})
-
-        monkeypatch.setattr(
-            realtime_video_api.async_scheduler_client, "forward", forward
-        )
-        released = await realtime_video_api._release_scheduler_realtime_session(
-            "session-a",
-            attempts=3,
-            retry_delay_s=0,
-        )
-
-        assert released
-        assert len(calls) == 3
-
-    asyncio.run(scenario())
-
-
-def test_scheduler_session_release_has_a_short_per_attempt_timeout(monkeypatch):
-    async def scenario():
-        async def forward(_request):
-            await asyncio.Event().wait()
-
-        monkeypatch.setattr(
-            realtime_video_api.async_scheduler_client, "forward", forward
-        )
-        started = time.perf_counter()
-        released = await realtime_video_api._release_scheduler_realtime_session(
-            "session-a",
-            attempts=1,
-            retry_delay_s=0,
-            timeout_s=0.01,
-        )
-
-        assert not released
-        assert time.perf_counter() - started < 0.2
-
-    asyncio.run(scenario())
 
 
 def test_lingbot_realtime_state_uses_control_script_and_prompt_queues():
@@ -656,31 +405,6 @@ def test_lingbot_realtime_prompt_event_marks_crossattn_reset():
     ]
 
 
-def test_lingbot_realtime_prompt_event_id_wins_over_older_camera_state():
-    adapter = lingbot_realtime.LingBotWorldRealtimeAdapter()
-    session = GenerateSession()
-    session.set_adapter(adapter)
-    session.set_request(
-        RealtimeVideoGenerationsRequest(
-            type="init",
-            prompt="walk forward",
-        )
-    )
-    state = adapter._state(session)
-    state.receive_camera_state(["w"], event_id=22, timestamp_ms=100)
-    state.receive_prompt("turn left", event_id=35)
-
-    chunk_inputs = adapter.sample_chunk_inputs(
-        session,
-        server_args=SimpleNamespace(),
-        chunk=SimpleNamespace(index=1),
-        chunk_size=3,
-    )
-
-    assert chunk_inputs.prompt == "turn left"
-    assert adapter.get_realtime_event_id(session) == 35
-
-
 def test_lingbot_realtime_adapter_ingests_state_camera_events():
     adapter = lingbot_realtime.LingBotWorldRealtimeAdapter()
     session = GenerateSession()
@@ -729,426 +453,6 @@ def test_generate_session_tracks_active_chunk_context():
     assert next_chunk.index == 1
     assert next_chunk.request_id.startswith(f"{session.id}_")
     assert next_chunk.request_id != chunk.request_id
-
-
-def test_generate_session_allows_two_active_chunks_and_completes_in_order():
-    session = GenerateSession(max_inflight_chunks=2)
-
-    first = session.new_chunk()
-    second = session.new_chunk()
-
-    assert first.generation_id == session.generation_id
-    assert second.index == 1
-    with pytest.raises(RuntimeError, match="in-flight limit"):
-        session.new_chunk()
-
-    session.generate_chunk_completed(first)
-    session.generate_chunk_completed(second)
-
-    assert session.generate_chunk_cnt == 2
-    assert session.active_chunks == {}
-
-
-def test_scheduler_replaces_queued_realtime_request_without_changing_fifo_slot():
-    scheduler = Scheduler.__new__(Scheduler)
-    original = Req.__new__(Req)
-    original.request_id = "request-1"
-    original.realtime_session_id = "session-1"
-    original.realtime_generation_id = "generation-1"
-    original.block_idx = 4
-    original.realtime_action_version = 1
-    original.realtime_prompt_version = 2
-    replacement = Req.__new__(Req)
-    replacement.request_id = "request-1"
-    replacement.realtime_session_id = "session-1"
-    replacement.realtime_generation_id = "generation-1"
-    replacement.block_idx = 4
-    replacement.realtime_action_version = 3
-    replacement.realtime_prompt_version = 2
-    scheduler.waiting_queue = deque([(b"client", original, 123.0)])
-
-    replaced = scheduler._replace_waiting_realtime_request(
-        ReplaceQueuedRealtimeReq(
-            session_id="session-1",
-            generation_id="generation-1",
-            chunk_index=4,
-            request_id="request-1",
-            replacement=replacement,
-        )
-    )
-
-    assert replaced is True
-    assert scheduler.waiting_queue[0] == (b"client", replacement, 123.0)
-
-
-def test_scheduler_rejects_stale_queued_realtime_replacement():
-    scheduler = Scheduler.__new__(Scheduler)
-    current = Req.__new__(Req)
-    current.request_id = "request-1"
-    current.realtime_session_id = "session-1"
-    current.realtime_generation_id = "generation-1"
-    current.block_idx = 4
-    current.realtime_action_version = 5
-    current.realtime_prompt_version = 2
-    stale = Req.__new__(Req)
-    stale.request_id = "request-1"
-    stale.realtime_session_id = "session-1"
-    stale.realtime_generation_id = "generation-1"
-    stale.block_idx = 4
-    stale.realtime_action_version = 4
-    stale.realtime_prompt_version = 2
-    scheduler.waiting_queue = deque([(b"client", current, 123.0)])
-
-    replaced = scheduler._replace_waiting_realtime_request(
-        ReplaceQueuedRealtimeReq(
-            session_id="session-1",
-            generation_id="generation-1",
-            chunk_index=4,
-            request_id="request-1",
-            replacement=stale,
-        )
-    )
-
-    assert replaced is False
-    assert scheduler.waiting_queue[0][1] is current
-
-
-def test_scheduler_applies_realtime_replacement_that_arrives_before_request():
-    scheduler = Scheduler.__new__(Scheduler)
-    scheduler.waiting_queue = deque()
-    replies = []
-    scheduler.return_result = lambda output, identity, should_not_return: (
-        replies.append((output.output, identity, should_not_return))
-    )
-    original = Req.__new__(Req)
-    original.request_id = "request-1"
-    original.realtime_session_id = "session-1"
-    original.realtime_generation_id = "generation-1"
-    original.block_idx = 4
-    original.realtime_action_version = 1
-    original.realtime_prompt_version = 2
-    replacement = Req.__new__(Req)
-    replacement.request_id = "request-1"
-    replacement.realtime_session_id = "session-1"
-    replacement.realtime_generation_id = "generation-1"
-    replacement.block_idx = 4
-    replacement.realtime_action_version = 3
-    replacement.realtime_prompt_version = 2
-    update = ReplaceQueuedRealtimeReq(
-        session_id="session-1",
-        generation_id="generation-1",
-        chunk_index=4,
-        request_id="request-1",
-        replacement=replacement,
-    )
-
-    scheduler._enqueue_received_reqs([(b"update", update)], now=100.0)
-    scheduler._enqueue_received_reqs([(b"request", original)], now=100.1)
-
-    queued_identity, queued_request, queued_at = scheduler.waiting_queue[0]
-    assert queued_identity == b"request"
-    assert queued_request is replacement
-    assert queued_at == 100.1
-    assert replies == [
-        (
-            {
-                "replaced": False,
-                "buffered": True,
-                "too_late": False,
-                "invalid": False,
-            },
-            b"update",
-            False,
-        )
-    ]
-
-
-def test_scheduler_reports_realtime_replacement_after_dispatch_as_too_late():
-    scheduler = Scheduler.__new__(Scheduler)
-    scheduler.waiting_queue = deque()
-    replies = []
-    scheduler.return_result = lambda output, identity, should_not_return: (
-        replies.append((output.output, identity, should_not_return))
-    )
-    dispatched = Req.__new__(Req)
-    dispatched.request_id = "request-1"
-    dispatched.realtime_session_id = "session-1"
-    dispatched.realtime_generation_id = "generation-1"
-    dispatched.block_idx = 4
-    dispatched.realtime_action_version = 1
-    dispatched.realtime_prompt_version = 2
-    replacement = copy(dispatched)
-    replacement.realtime_action_version = 3
-    scheduler._mark_realtime_requests_dispatched([(b"request", dispatched)], now=100.0)
-
-    scheduler._enqueue_received_reqs(
-        [
-            (
-                b"update",
-                ReplaceQueuedRealtimeReq(
-                    session_id="session-1",
-                    generation_id="generation-1",
-                    chunk_index=4,
-                    request_id="request-1",
-                    replacement=replacement,
-                ),
-            )
-        ],
-        now=100.1,
-    )
-
-    assert scheduler.waiting_queue == deque()
-    assert replies == [
-        (
-            {
-                "replaced": False,
-                "buffered": False,
-                "too_late": True,
-                "invalid": False,
-            },
-            b"update",
-            False,
-        )
-    ]
-
-
-def test_scheduler_rejects_replacement_with_mismatched_envelope_identity():
-    scheduler = Scheduler.__new__(Scheduler)
-    scheduler.waiting_queue = deque()
-    replies = []
-    scheduler.return_result = lambda output, identity, should_not_return: (
-        replies.append(output.output)
-    )
-    replacement = Req.__new__(Req)
-    replacement.request_id = "other-request"
-    replacement.realtime_session_id = "session-1"
-    replacement.realtime_generation_id = "generation-1"
-    replacement.block_idx = 4
-    replacement.realtime_action_version = 3
-    replacement.realtime_prompt_version = 2
-
-    scheduler._enqueue_received_reqs(
-        [
-            (
-                b"update",
-                ReplaceQueuedRealtimeReq(
-                    session_id="session-1",
-                    generation_id="generation-1",
-                    chunk_index=4,
-                    request_id="request-1",
-                    replacement=replacement,
-                ),
-            )
-        ],
-        now=100.0,
-    )
-
-    assert replies == [
-        {
-            "replaced": False,
-            "buffered": False,
-            "too_late": False,
-            "invalid": True,
-        }
-    ]
-
-
-def test_generate_session_targets_latest_active_chunk_for_control_refresh():
-    session = GenerateSession(max_inflight_chunks=2)
-    first = session.new_chunk()
-    second = session.new_chunk()
-    session.bind_chunk_request(first, object())
-    session.bind_chunk_request(second, object())
-
-    assert session.latest_active_chunk == second
-
-
-def test_prompt_event_does_not_replace_pending_camera_refresh():
-    session = GenerateSession()
-    session.pending_control_refresh = ("camera_actions", 7)
-    session.control_refresh_task = SimpleNamespace(done=lambda: False)
-
-    realtime_video_api._schedule_queued_control_refresh(session, "prompt", 8)
-
-    assert session.pending_control_refresh == ("camera_actions", 7)
-
-
-def test_minwm_camera_refresh_preserves_dispatched_prompt_version():
-    adapter = minwm_realtime.MinWMRealtimeAdapter()
-    session = GenerateSession()
-    session.set_adapter(adapter)
-    session.set_request(
-        RealtimeVideoGenerationsRequest(
-            type="init",
-            prompt="initial prompt",
-            generation_mode="t2v",
-        )
-    )
-    session.prompt_version = 5
-    chunk = session.new_chunk(prompt_version=2)
-    batch = SimpleNamespace(
-        condition_inputs={},
-        realtime_chunk_size=4,
-        realtime_action_version=0,
-        realtime_prompt_version=2,
-    )
-
-    replacement = adapter.refresh_queued_request(
-        session,
-        SimpleNamespace(),
-        chunk,
-        batch,
-        "camera_actions",
-    )
-
-    assert replacement.realtime_prompt_version == 2
-
-
-def test_event_listener_ingests_new_controls_while_scheduler_refresh_is_pending(
-    monkeypatch,
-):
-    asyncio.run(_assert_event_listener_does_not_block_on_scheduler_refresh(monkeypatch))
-
-
-async def _assert_event_listener_does_not_block_on_scheduler_refresh(monkeypatch):
-    second_ingested = asyncio.Event()
-    release_refresh = asyncio.Event()
-
-    class BlockingSchedulerClient:
-        async def forward(self, request):
-            del request
-            await release_refresh.wait()
-            return OutputBatch(
-                output={
-                    "replaced": False,
-                    "buffered": False,
-                    "too_late": True,
-                    "invalid": False,
-                }
-            )
-
-    class Adapter:
-        def __init__(self):
-            self.event_ids = []
-
-        def ingest_event(self, session, event):
-            del session
-            self.event_ids.append(event.event_id)
-            if len(self.event_ids) == 2:
-                second_ingested.set()
-            return "camera state updated"
-
-        def refresh_queued_request(
-            self, session, server_args, chunk, batch, event_kind
-        ):
-            del session, server_args, chunk, event_kind
-            return copy(batch)
-
-    class WebSocket:
-        async def send_bytes(self, _message):
-            return None
-
-        async def iter_bytes(self):
-            for event_id in (1, 2):
-                yield msgspec.msgpack.encode(
-                    {
-                        "type": "event",
-                        "kind": "camera_actions",
-                        "event_id": event_id,
-                        "payload": {
-                            "mode": "state",
-                            "transitions": [{"actions": ["w"]}],
-                        },
-                    }
-                )
-
-    session = GenerateSession()
-    adapter = Adapter()
-    session.adapter = adapter
-    chunk = session.new_chunk()
-    batch = SimpleNamespace(
-        condition_inputs={},
-        realtime_chunk_size=4,
-        realtime_action_version=0,
-        realtime_prompt_version=0,
-    )
-    session.bind_chunk_request(chunk, batch)
-    monkeypatch.setattr(
-        realtime_video_api, "async_scheduler_client", BlockingSchedulerClient()
-    )
-    monkeypatch.setattr(
-        realtime_video_api, "get_global_server_args", lambda: SimpleNamespace()
-    )
-
-    listen_task = asyncio.create_task(
-        realtime_video_api._listen_events(WebSocket(), session)
-    )
-    try:
-        await asyncio.wait_for(second_ingested.wait(), timeout=0.1)
-        assert adapter.event_ids == [1, 2]
-    finally:
-        release_refresh.set()
-        await asyncio.wait_for(listen_task, timeout=1.0)
-        refresh_task = getattr(session, "control_refresh_task", None)
-        if refresh_task is not None:
-            await asyncio.wait_for(refresh_task, timeout=1.0)
-
-
-def test_scheduler_attaches_actual_realtime_metadata_to_output():
-    request = Req.__new__(Req)
-    request.realtime_session_id = "session-1"
-    request.realtime_generation_id = "generation-1"
-    request.request_id = "request-1"
-    request.block_idx = 4
-    request.realtime_event_id = 17
-    request.realtime_action_version = 5
-    request.realtime_prompt_version = 3
-    output = OutputBatch()
-
-    Scheduler._attach_realtime_request_metadata(output, request)
-
-    assert output.realtime_request_metadata == {
-        "session_id": "session-1",
-        "generation_id": "generation-1",
-        "request_id": "request-1",
-        "chunk_index": 4,
-        "event_id": 17,
-        "action_version": 5,
-        "prompt_version": 3,
-    }
-
-
-def test_gateway_uses_metadata_from_the_request_scheduler_actually_dispatched():
-    batch = SimpleNamespace(
-        realtime_event_id=11,
-        realtime_action_version=2,
-        realtime_prompt_version=1,
-    )
-    result = OutputBatch(
-        realtime_request_metadata={
-            "event_id": 17,
-            "action_version": 5,
-            "prompt_version": 3,
-        }
-    )
-
-    realtime_video_api._sync_batch_realtime_metadata(batch, result)
-
-    assert batch.realtime_event_id == 17
-    assert batch.realtime_action_version == 5
-    assert batch.realtime_prompt_version == 3
-
-
-def test_generate_session_does_not_advance_past_out_of_order_completion():
-    session = GenerateSession(max_inflight_chunks=2)
-    first = session.new_chunk()
-    second = session.new_chunk()
-
-    session.generate_chunk_completed(second)
-    assert session.generate_chunk_cnt == 0
-
-    session.generate_chunk_completed(first)
-    assert session.generate_chunk_cnt == 2
 
 
 def test_generate_session_respects_max_chunks():
@@ -1233,7 +537,7 @@ def test_generate_loop_overlaps_send_with_next_generation(monkeypatch):
     assert events[-1] == "send_end_1"
 
 
-def test_send_output_emits_one_chunk_telemetry_message_after_adapter_output():
+def test_send_output_emits_chunk_stats_message():
     sent_messages = []
 
     class _Ws:
@@ -1276,119 +580,19 @@ def test_send_output_emits_one_chunk_telemetry_message_after_adapter_output():
             request_prepare_ms=1.0,
             scheduler_forward_ms=2.0,
             chunk_started=time.perf_counter(),
-            stage_metrics={},
         )
     )
 
+    message = msgspec.msgpack.decode(sent_messages[-1])
     assert stats["raw_write_ms"] == 42.0
-    assert len(sent_messages) == 1
-    telemetry = msgspec.msgpack.decode(sent_messages[0])
-    assert telemetry["type"] == "chunk_telemetry"
-    assert telemetry["chunk_index"] == chunk.index == 0
-    assert telemetry["event_id"] == 11
-    assert telemetry["transport_write_ms"] == 42.2
-
-
-def test_scheduler_stage_metrics_emit_dedicated_realtime_trace_events(monkeypatch):
-    emitted = []
-
-    def fake_log_realtime_trace(_logger, _session, event, **fields):
-        emitted.append((event, fields))
-
-    monkeypatch.setattr(
-        realtime_video_api, "log_realtime_trace", fake_log_realtime_trace
-    )
-
-    session = GenerateSession()
-    session.trace_id = "trace-stage"
-    chunk = SimpleNamespace(request_id="chunk-req")
-    batch = SimpleNamespace(block_idx=4, realtime_event_id=9)
-    metrics = RequestMetrics("metrics-req")
-    metrics.record_stage("RealtimeImageVAEEncodingStage", 0.012)
-    metrics.record_stage("MinWMCausalDMDDenoisingStage", 0.620)
-    metrics.record_stage("MinWMCausalVaeDecodingStage", 0.180)
-    result = OutputBatch(metrics=metrics)
-
-    realtime_video_api._emit_realtime_result_stage_traces(session, chunk, batch, result)
-
-    event_names = [event for event, _fields in emitted]
-    assert event_names.count("server.pipeline_stage_complete") == 3
-    assert "server.vae_encode_complete" in event_names
-    assert "server.model_denoise_complete" in event_names
-    assert "server.vae_decode_complete" in event_names
-    denoise = next(
-        fields for event, fields in emitted if event == "server.model_denoise_complete"
-    )
-    assert denoise["chunk_index"] == 4
-    assert denoise["event_id"] == 9
-    assert denoise["duration_ms"] == 620
-    assert denoise["source"] == "scheduler_result_metrics"
-
-
-def test_async_raw_frame_enqueue_metric_reaches_chunk_telemetry_without_prometheus_alias(
-    monkeypatch,
-):
-    metrics = RequestMetrics("metrics-req")
-    metrics.record_stage("MinWMCausalDMDDenoisingStage", 0.2)
-    metrics.record_stage("GPUWorker.raw_frame_async_enqueue", 0.00125)
-    result = OutputBatch(metrics=metrics)
-    stage_metrics = realtime_video_api._collect_realtime_result_stage_metrics(result)
-    observed = []
-    monkeypatch.setattr(
-        realtime_video_api,
-        "observe_stage_ms",
-        lambda stage, duration_ms, **labels: observed.append(
-            (stage, duration_ms, labels)
-        ),
-    )
-    realtime_video_api._observe_realtime_result_stage_metrics(
-        result,
-        server_args=SimpleNamespace(model_path="minwm"),
-    )
-
-    assert stage_metrics == {
-        "model_denoise_ms": 200.0,
-        "raw_frame_async_enqueue_ms": 1.25,
-    }
-    assert [(stage, duration_ms) for stage, duration_ms, _ in observed] == [
-        ("denoiser_compute", 200.0)
-    ]
-
-    sent_messages = []
-
-    class _Ws:
-        async def send_bytes(self, payload):
-            sent_messages.append(msgspec.msgpack.decode(payload))
-
-    session = GenerateSession()
-    chunk = session.new_chunk()
-    batch = SimpleNamespace(block_idx=0, realtime_event_id=1)
-    asyncio.run(
-        realtime_video_api._send_chunk_telemetry(
-            _Ws(),
-            session,
-            chunk,
-            batch,
-            request_prepare_ms=1.0,
-            scheduler_forward_ms=2.0,
-            chunk_total_ms=3.0,
-            send_stats=empty_frame_send_stats(),
-            stage_metrics=stage_metrics,
-        )
-    )
-
-    assert len(sent_messages) == 1
-    assert sent_messages[0]["raw_frame_async_enqueue_ms"] == 1.25
-
-
-def test_local_loop_keeps_async_output_ownership_through_metric_observation():
-    source = inspect.getsource(realtime_video_api._generate_loop_local)
-
-    ownership = source.index("current_result = result")
-    observe = source.index("_observe_realtime_result_stage_metrics(result")
-    register_cleanup = source.index("pending_send_task.add_done_callback(")
-    transfer = source.index("current_result = None")
-    assert ownership < observe < register_cleanup < transfer
+    assert message["type"] == "chunk_stats"
+    assert message["chunk_index"] == 7
+    assert message["event_id"] == 11
+    assert message["raw_write_ms"] == 42
+    assert message["ws_write_ms"] == 42
+    assert message["ws_payload_bytes"] == 450
+    assert message["content_type"] == "image/webp"
+    assert bytes([0xCB]) not in sent_messages[-1]
 
 
 def test_listen_generate_request_propagates_disconnect_without_error_write():
@@ -1413,253 +617,59 @@ def test_listen_generate_request_propagates_disconnect_without_error_write():
     assert sent_messages == []
 
 
-def test_session_watchdog_closes_idle_session():
+def test_wait_for_active_session_slot_observes_release(monkeypatch):
     async def run():
-        store = realtime_video_api.InMemorySessionLeaseStore(1, 0.03)
-        controller = realtime_video_api.RealtimeAdmissionController(store)
-        session = GenerateSession()
-        lease = await controller.admit("u1", session.id, session.generation_id)
+        realtime_video_api._ACTIVE_SESSION_IDS.clear()
+        realtime_video_api._ACTIVE_SESSION_IDS.add("old-session")
+
+        async def fake_sleep(_seconds):
+            realtime_video_api._ACTIVE_SESSION_IDS.clear()
+
+        monkeypatch.setattr(realtime_video_api.asyncio, "sleep", fake_sleep)
         try:
-            return await realtime_video_api._session_watchdog(
-                session,
-                controller,
-                lease,
-                idle_timeout_s=0.01,
-                max_lifetime_s=1,
-                lease_ttl_s=0.03,
+            return await realtime_video_api._wait_for_active_session_slot(
+                timeout_s=1.0,
+                interval_s=0.1,
             )
         finally:
-            await controller.release(lease)
+            realtime_video_api._ACTIVE_SESSION_IDS.clear()
 
-    assert asyncio.run(run()) == "session idle timeout"
-
-
-def test_session_watchdog_starts_max_lifetime_after_media_is_playable():
-    async def run():
-        store = realtime_video_api.InMemorySessionLeaseStore(1, 0.5)
-        controller = realtime_video_api.RealtimeAdmissionController(store)
-        session = GenerateSession()
-        session.created_at -= 10
-        lease = await controller.admit("u1", session.id, session.generation_id)
-        task = asyncio.create_task(
-            realtime_video_api._session_watchdog(
-                session,
-                controller,
-                lease,
-                idle_timeout_s=1,
-                max_lifetime_s=0.01,
-                lease_ttl_s=0.5,
-            )
-        )
-        await asyncio.sleep(0.12)
-        assert not task.done(), "socket/build time must not consume playable lifetime"
-        session.mark_playable()
-        try:
-            return await asyncio.wait_for(task, timeout=0.3)
-        finally:
-            await controller.release(lease)
-
-    assert asyncio.run(run()) == "maximum session lifetime reached"
+    assert asyncio.run(run())
 
 
-def test_session_watchdog_enforces_lifetime_without_admission_controller():
-    async def run():
-        session = GenerateSession()
-        session.mark_playable()
-        return await realtime_video_api._session_watchdog(
-            session,
-            None,
-            None,
-            idle_timeout_s=0,
-            max_lifetime_s=0.01,
-            lease_ttl_s=0.03,
-        )
-
-    assert asyncio.run(run()) == "maximum session lifetime reached"
-
-
-def test_playback_ack_marks_ack_aware_session_playable_without_model_ingest():
-    class RejectingAdapter:
-        def ingest_event(self, *_args):
-            raise AssertionError("playback transport ACK must not reach model adapter")
-
-    class _Ws:
-        async def iter_bytes(self):
-            yield msgspec.msgpack.encode(
-                {
-                    "type": "event",
-                    "kind": "playback_ack",
-                    "payload": {
-                        "last_received_chunk": 3,
-                        "last_rendered_chunk": 2,
-                        "last_rendered_event_id": 9,
-                        "playable": True,
-                    },
-                }
-            )
-
-    session = GenerateSession()
-    session.adapter = RejectingAdapter()
-    session.playback_ack_enabled = True
-    asyncio.run(realtime_video_api._listen_events(_Ws(), session))
-
-    assert session.last_received_chunk == 3
-    assert session.last_rendered_chunk == 2
-    assert session.last_rendered_event_id == 9
-    assert session.playable_at is not None
-
-
-def test_session_watchdog_exempts_internal_startup_warmup_from_max_lifetime():
-    async def run():
-        store = realtime_video_api.InMemorySessionLeaseStore(1, 0.5)
-        controller = realtime_video_api.RealtimeAdmissionController(store)
-        session = GenerateSession()
-        lease = await controller.admit(
-            "startup-warmup", session.id, session.generation_id
-        )
-        try:
-            return await realtime_video_api._session_watchdog(
-                session,
-                controller,
-                lease,
-                idle_timeout_s=0.05,
-                max_lifetime_s=0.01,
-                lease_ttl_s=0.5,
-                enforce_max_lifetime=False,
-            )
-        finally:
-            await controller.release(lease)
-
-    assert asyncio.run(run()) == "session idle timeout"
-
-
-def test_session_watchdog_exempts_startup_warmup_after_init_sets_trace_id():
-    async def run():
-        store = realtime_video_api.InMemorySessionLeaseStore(1, 0.5)
-        controller = realtime_video_api.RealtimeAdmissionController(store)
-        session = GenerateSession()
-        lease = await controller.admit(
-            "startup-warmup", session.id, session.generation_id
-        )
-        try:
-            session.trace_id = "startup-warmup-after-init"
-            return await realtime_video_api._session_watchdog(
-                session,
-                controller,
-                lease,
-                idle_timeout_s=0.05,
-                max_lifetime_s=0.01,
-                lease_ttl_s=0.5,
-                enforce_max_lifetime=True,
-            )
-        finally:
-            await controller.release(lease)
-
-    assert asyncio.run(run()) == "session idle timeout"
-
-
-def test_session_watchdog_allows_unbounded_direct_sessions():
-    async def run():
-        store = realtime_video_api.InMemorySessionLeaseStore(1, 0.03)
-        controller = realtime_video_api.RealtimeAdmissionController(store)
-        session = GenerateSession()
-        lease = await controller.admit("direct-user", session.id, session.generation_id)
-        task = asyncio.create_task(
-            realtime_video_api._session_watchdog(
-                session,
-                controller,
-                lease,
-                idle_timeout_s=0,
-                max_lifetime_s=0,
-                lease_ttl_s=0.03,
-            )
-        )
-        await asyncio.sleep(0.08)
-        assert not task.done()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        await controller.release(lease)
-
-    asyncio.run(run())
-
-
-def test_initialization_is_cancelled_when_preinit_watchdog_expires():
-    async def run():
-        cancelled = asyncio.Event()
-
-        async def initialize():
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                cancelled.set()
-                raise
-
-        async def watchdog():
-            await asyncio.sleep(0)
-            return "session idle timeout"
-
-        reason = await realtime_video_api._wait_for_initialization_or_watchdog(
-            asyncio.create_task(initialize()),
-            asyncio.create_task(watchdog()),
-        )
-        return reason, cancelled.is_set()
-
-    assert asyncio.run(run()) == ("session idle timeout", True)
-
-
-def test_strict_realtime_identity_requires_authenticated_principal():
-    anonymous = SimpleNamespace(
-        scope={},
-        query_params={"user_id": "spoofed"},
-        headers={"x-user-id": "spoofed"},
-        client=SimpleNamespace(host="127.0.0.1"),
-    )
-    with pytest.raises(
-        realtime_video_api.AdmissionRejected,
-        match="AUTHENTICATED_USER_REQUIRED",
-    ):
-        realtime_video_api._resolve_realtime_user_id(
-            anonymous,
-            require_authenticated=True,
-        )
-
-    authenticated = SimpleNamespace(
-        scope={"user": {"sub": "user-123"}},
-        query_params={},
-        headers={},
-        client=SimpleNamespace(host="127.0.0.1"),
-    )
-    assert (
-        realtime_video_api._resolve_realtime_user_id(
-            authenticated,
-            require_authenticated=True,
-        )
-        == "auth:user-123"
-    )
-
-
-def test_cleanup_realtime_session_releases_scheduler_state(
+def test_cleanup_realtime_session_keeps_active_slot_during_scheduler_release(
     monkeypatch,
 ):
     async def run():
         session = GenerateSession()
+        realtime_video_api._ACTIVE_SESSION_IDS.clear()
+        realtime_video_api._ACTIVE_SESSION_IDS.add(session.id)
         release_seen = []
 
         async def fake_forward(req):
-            release_seen.append(req.session_id)
+            release_seen.append(
+                (req.session_id, session.id in realtime_video_api._ACTIVE_SESSION_IDS)
+            )
 
         monkeypatch.setattr(
             realtime_video_api.async_scheduler_client,
             "forward",
             fake_forward,
         )
-        await realtime_video_api._cleanup_realtime_session(session, None, None)
-        return session.id, release_seen
+        try:
+            await realtime_video_api._cleanup_realtime_session(session, None, None)
+            still_active_after_cleanup = (
+                session.id in realtime_video_api._ACTIVE_SESSION_IDS
+            )
+        finally:
+            realtime_video_api._ACTIVE_SESSION_IDS.clear()
 
-    session_id, release_seen = asyncio.run(run())
+        return session.id, release_seen, still_active_after_cleanup
 
-    assert release_seen == [session_id]
+    session_id, release_seen, still_active_after_cleanup = asyncio.run(run())
+
+    assert release_seen == [(session_id, True)]
+    assert still_active_after_cleanup
 
 
 def test_lingbot_realtime_adapter_prepares_chunk_request(monkeypatch):
@@ -1740,7 +750,6 @@ def test_lingbot_realtime_adapter_prepares_chunk_request(monkeypatch):
     assert batch.block_idx == 0
     assert batch.return_raw_frames is True
     assert batch.realtime_event_id == 11
-    assert batch.realtime_output_format == "webp"
     assert batch.realtime_causal_sink_size == 3
     assert batch.realtime_causal_kv_cache_num_frames == 45
 

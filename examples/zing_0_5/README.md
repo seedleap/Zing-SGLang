@@ -5,7 +5,8 @@ model download, server launch, and memory profiles.
 
 `launch_server.sh` starts either the `highmem` profile or the conservative
 `ZING_PROFILE=32g` profile. Set `ZING_MODEL_PATH` to the downloaded serving
-artifact directory.
+artifact directory. It loads `taew2_2.pth` from that directory by default; set
+`ZING_TAEHV_PATH` when the local TAEHV checkpoint is stored elsewhere.
 
 `client.py` is intentionally small. It sends one realtime msgpack request,
 optionally queues a prompt update, and saves the returned WebP frames without

@@ -26,15 +26,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.m
 from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime import (
     RealtimeImageVAEEncodingStage,
     RealtimeInputValidationStage,
-    RealtimeLatentHandoffStage,
     RealtimeTextEncodingStage,
 )
-from sglang.multimodal_gen.runtime.realtime_vae_config import uses_remote_vae
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
-
-
-def _use_remote_realtime_vae(server_args: ServerArgs) -> bool:
-    return uses_remote_vae(getattr(server_args, "realtime_vae_backend", "local"))
 
 
 class MinWMCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
@@ -116,12 +110,9 @@ class MinWMCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
         )
         denoising_stage.initialize_realtime_kv_cache_pool(server_args)
         self.add_stage(denoising_stage)
-        self._add_realtime_output_stage(server_args)
+        self._add_realtime_output_stage()
 
-    def _add_realtime_output_stage(self, server_args: ServerArgs) -> None:
-        if _use_remote_realtime_vae(server_args):
-            self.add_stage(RealtimeLatentHandoffStage())
-            return
+    def _add_realtime_output_stage(self) -> None:
         self.add_stage(
             MinWMCausalVaeDecodingStage(
                 vae=self.get_module("vae"),
@@ -172,7 +163,7 @@ class MinWMCausalUniPCPipeline(MinWMCausalDMDPipeline):
         )
         denoising_stage.initialize_realtime_kv_cache_pool(server_args)
         self.add_stage(denoising_stage)
-        self._add_realtime_output_stage(server_args)
+        self._add_realtime_output_stage()
 
 
 class ZingCausalDMDPipeline(MinWMCausalDMDPipeline):

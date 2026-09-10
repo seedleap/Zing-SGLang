@@ -21,7 +21,6 @@ from sglang.multimodal_gen.runtime.entrypoints.control_requests import (
     ListLorasReq,
     MergeLoraWeightsReq,
     ReleaseRealtimeSessionReq,
-    ReplaceQueuedRealtimeReq,
     SetLoraReq,
     ShutdownReq,
     UnmergeLoraWeightsReq,
@@ -51,9 +50,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import (
 from sglang.multimodal_gen.runtime.post_training.scheduler_post_training_mixin import (
     SchedulerPostTrainingMixin,
 )
-from sglang.multimodal_gen.runtime.realtime.critical_path_metrics import (
-    observe_stage_seconds,
-)
 from sglang.multimodal_gen.runtime.server_args import (
     PortArgs,
     ServerArgs,
@@ -69,19 +65,12 @@ from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket
 from sglang.multimodal_gen.runtime.utils.distributed import broadcast_pyobj
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.profiler import maybe_record_function
-from sglang.multimodal_gen.runtime.utils.realtime_video import (
-    cancel_async_raw_rgb_frame_reference,
-)
 from sglang.multimodal_gen.runtime.utils.trace_wrapper import DiffStage, trace_slice
 
 logger = init_logger(__name__)
 
 _MAX_RECV_REQS_PER_POLL = 1024
 _BATCH_METRICS_LOG_INTERVAL = 5
-_MAX_PENDING_REALTIME_REPLACEMENTS = 1024
-_REALTIME_REPLACEMENT_TTL_S = 5.0
-_MAX_DISPATCHED_REALTIME_REQUESTS = 4096
-_DISPATCHED_REALTIME_REQUEST_TTL_S = 10.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -172,10 +161,6 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
 
         # FIFO queue entries: (identity, request, enqueue_ts_s)
         self.waiting_queue: deque[tuple[bytes | None, Any, float]] = deque()
-        self._pending_realtime_replacements: dict[
-            tuple[str, str, int, str], tuple[ReplaceQueuedRealtimeReq, float]
-        ] = {}
-        self._dispatched_realtime_requests: dict[tuple[str, str, int, str], float] = {}
         self._batching_max_size = server_args.batching_max_size
         self._batching_delay_s = server_args.batching_delay_ms / 1000.0
         self._batch_metrics_enabled = server_args.enable_batching_metrics
@@ -248,218 +233,6 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
     def _handle_release_realtime_session(self, reqs: List[Any]) -> OutputBatch:
         req = reqs[0]
         return self.worker.release_realtime_session(req.session_id)
-
-    def _replace_waiting_realtime_request(
-        self, update: ReplaceQueuedRealtimeReq
-    ) -> bool:
-        replacement = update.replacement
-        for index, (identity, current, enqueue_time) in enumerate(self.waiting_queue):
-            if not isinstance(current, Req):
-                continue
-            if (
-                current.request_id != update.request_id
-                or current.realtime_session_id != update.session_id
-                or current.realtime_generation_id != update.generation_id
-                or current.block_idx != update.chunk_index
-            ):
-                continue
-            if (
-                replacement.realtime_action_version < current.realtime_action_version
-                or replacement.realtime_prompt_version < current.realtime_prompt_version
-            ):
-                return False
-            self.waiting_queue[index] = (identity, replacement, enqueue_time)
-            return True
-        return False
-
-    @staticmethod
-    def _realtime_request_key(
-        request: Req | ReplaceQueuedRealtimeReq,
-    ) -> tuple[str, str, int, str]:
-        if isinstance(request, ReplaceQueuedRealtimeReq):
-            return (
-                request.session_id,
-                request.generation_id,
-                request.chunk_index,
-                request.request_id,
-            )
-        return (
-            request.realtime_session_id,
-            request.realtime_generation_id,
-            request.block_idx,
-            request.request_id,
-        )
-
-    @staticmethod
-    def _replacement_is_current(replacement: Req, current: Req) -> bool:
-        return (
-            replacement.realtime_action_version >= current.realtime_action_version
-            and replacement.realtime_prompt_version >= current.realtime_prompt_version
-        )
-
-    def _replacement_matches_envelope(self, update: ReplaceQueuedRealtimeReq) -> bool:
-        return self._realtime_request_key(
-            update.replacement
-        ) == self._realtime_request_key(update)
-
-    def _find_waiting_realtime_request(
-        self, update: ReplaceQueuedRealtimeReq
-    ) -> Req | None:
-        update_key = self._realtime_request_key(update)
-        for _identity, current, _enqueue_time in self.waiting_queue:
-            if (
-                isinstance(current, Req)
-                and self._realtime_request_key(current) == update_key
-            ):
-                return current
-        return None
-
-    def _prune_pending_realtime_replacements(self, now: float) -> None:
-        pending = getattr(self, "_pending_realtime_replacements", None)
-        if pending is None:
-            pending = self._pending_realtime_replacements = {}
-        expired = [
-            key for key, (_update, deadline) in pending.items() if deadline <= now
-        ]
-        for key in expired:
-            pending.pop(key, None)
-        while len(pending) > _MAX_PENDING_REALTIME_REPLACEMENTS:
-            pending.pop(next(iter(pending)))
-
-    def _prune_dispatched_realtime_requests(self, now: float) -> None:
-        dispatched = getattr(self, "_dispatched_realtime_requests", None)
-        if dispatched is None:
-            dispatched = self._dispatched_realtime_requests = {}
-        expired = [key for key, deadline in dispatched.items() if deadline <= now]
-        for key in expired:
-            dispatched.pop(key, None)
-        while len(dispatched) > _MAX_DISPATCHED_REALTIME_REQUESTS:
-            dispatched.pop(next(iter(dispatched)))
-
-    def _mark_realtime_requests_dispatched(
-        self, items: list[tuple[bytes | None, Any]], *, now: float
-    ) -> None:
-        self._prune_dispatched_realtime_requests(now)
-        for _identity, request in items:
-            if not isinstance(request, Req) or not request.realtime_session_id:
-                continue
-            self._dispatched_realtime_requests[self._realtime_request_key(request)] = (
-                now + _DISPATCHED_REALTIME_REQUEST_TTL_S
-            )
-        self._prune_dispatched_realtime_requests(now)
-
-    def _realtime_request_was_dispatched(
-        self, update: ReplaceQueuedRealtimeReq, *, now: float
-    ) -> bool:
-        self._prune_dispatched_realtime_requests(now)
-        return self._realtime_request_key(update) in self._dispatched_realtime_requests
-
-    def _buffer_realtime_replacement(
-        self, update: ReplaceQueuedRealtimeReq, *, now: float
-    ) -> bool:
-        self._prune_pending_realtime_replacements(now)
-        key = self._realtime_request_key(update)
-        pending = self._pending_realtime_replacements
-        current_entry = pending.get(key)
-        if current_entry is not None and not self._replacement_is_current(
-            update.replacement, current_entry[0].replacement
-        ):
-            return False
-        pending[key] = (update, now + _REALTIME_REPLACEMENT_TTL_S)
-        self._prune_pending_realtime_replacements(now)
-        return True
-
-    def _take_pending_realtime_replacement(self, request: Req, *, now: float) -> Req:
-        self._prune_pending_realtime_replacements(now)
-        entry = self._pending_realtime_replacements.pop(
-            self._realtime_request_key(request), None
-        )
-        if entry is None:
-            return request
-        replacement = entry[0].replacement
-        if not self._replacement_is_current(replacement, request):
-            return request
-        return replacement
-
-    def _enqueue_received_reqs(
-        self,
-        new_reqs: list[tuple[bytes, Any]],
-        *,
-        now: float,
-    ) -> None:
-        self._prune_pending_realtime_replacements(now)
-        self._prune_dispatched_realtime_requests(now)
-        for identity, req in new_reqs:
-            if isinstance(req, ReplaceQueuedRealtimeReq):
-                invalid = not self._replacement_matches_envelope(req)
-                waiting_request = (
-                    None if invalid else self._find_waiting_realtime_request(req)
-                )
-                replaced = (
-                    False if invalid else self._replace_waiting_realtime_request(req)
-                )
-                buffered = False
-                too_late = False
-                if not invalid and waiting_request is None:
-                    too_late = self._realtime_request_was_dispatched(req, now=now)
-                if not invalid and waiting_request is None and not too_late:
-                    buffered = self._buffer_realtime_replacement(req, now=now)
-                self.return_result(
-                    OutputBatch(
-                        output={
-                            "replaced": replaced,
-                            "buffered": buffered,
-                            "too_late": too_late,
-                            "invalid": invalid,
-                        }
-                    ),
-                    identity,
-                    should_not_return=False,
-                )
-                continue
-            if isinstance(req, Req):
-                req = self._take_pending_realtime_replacement(req, now=now)
-            self.waiting_queue.append((identity, req, now))
-
-    def _observe_realtime_scheduler_queue(
-        self,
-        req: Any,
-        enqueue_time: float,
-        *,
-        now: float | None = None,
-        result: str = "success",
-    ) -> None:
-        if (
-            not isinstance(req, Req)
-            or req.is_warmup
-            or not getattr(req, "realtime_session_id", None)
-        ):
-            return
-        model = getattr(self.server_args, "model_id", None) or getattr(
-            self.server_args, "model_path", None
-        )
-        observe_stage_seconds(
-            "scheduler_queue",
-            (now if now is not None else time.monotonic()) - enqueue_time,
-            service="denoiser",
-            model=model,
-            result=result,
-            scope="chunk",
-        )
-
-    @staticmethod
-    def _attach_realtime_request_metadata(output: OutputBatch, request: Any) -> None:
-        if not isinstance(request, Req) or not request.realtime_session_id:
-            return
-        output.realtime_request_metadata = {
-            "session_id": request.realtime_session_id,
-            "generation_id": request.realtime_generation_id,
-            "request_id": request.request_id,
-            "chunk_index": request.block_idx,
-            "event_id": request.realtime_event_id,
-            "action_version": request.realtime_action_version,
-            "prompt_version": request.realtime_prompt_version,
-        }
 
     def _handle_update_weights_from_disk(self, reqs: List[Any]) -> OutputBatch:
         """Handle update_weights_from_disk request for RL workflows."""
@@ -952,44 +725,26 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
         replies to client, only on rank 0
         """
         if not should_not_return and self.receiver is not None and identity is not None:
-            try:
-                with maybe_record_function("REPLY spill+pickle+send"):
-                    # if the server is local, use temp file to spill the frame array instead of
-                    # leaving it in OutputBatch to be pickled later
-                    if is_local_endpoint(self.server_args.scheduler_endpoint):
-                        with self._record_return_stage(
-                            output_batch, "Scheduler.return_result.spill_arrays"
-                        ):
-                            output_batch.output = spill_large_arrays_to_file_refs(
-                                output_batch.output
-                            )
-
+            with maybe_record_function("REPLY spill+pickle+send"):
+                # if the server is local, use temp file to spill the frame array
+                # instead of leaving it in OutputBatch to be pickled later
+                if is_local_endpoint(self.server_args.scheduler_endpoint):
                     with self._record_return_stage(
-                        output_batch, "Scheduler.return_result.pickle"
+                        output_batch, "Scheduler.return_result.spill_arrays"
                     ):
-                        payload = pickle.dumps(output_batch)
+                        output_batch.output = spill_large_arrays_to_file_refs(
+                            output_batch.output
+                        )
 
-                    with self._record_return_stage(
-                        output_batch, "Scheduler.return_result.send"
-                    ):
-                        self.receiver.send_multipart([identity, b"", payload])
-            except Exception:
-                try:
-                    cancel_async_raw_rgb_frame_reference(
-                        output_batch.raw_frame_shared_memory_ref
-                    )
-                except Exception:
-                    logger.exception("failed to cancel unsent raw-frame reference")
-                output_batch.raw_frame_shared_memory_ref = None
-                raise
-        elif output_batch.raw_frame_shared_memory_ref is not None:
-            try:
-                cancel_async_raw_rgb_frame_reference(
-                    output_batch.raw_frame_shared_memory_ref
-                )
-            except Exception:
-                logger.exception("failed to cancel dropped raw-frame reference")
-            output_batch.raw_frame_shared_memory_ref = None
+                with self._record_return_stage(
+                    output_batch, "Scheduler.return_result.pickle"
+                ):
+                    payload = pickle.dumps(output_batch)
+
+                with self._record_return_stage(
+                    output_batch, "Scheduler.return_result.send"
+                ):
+                    self.receiver.send_multipart([identity, b"", payload])
 
     @staticmethod
     def _req_label(items: list) -> str:
@@ -1009,7 +764,6 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
         output_batch: OutputBatch,
     ) -> None:
         identity, processed_req = item
-        self._attach_realtime_request_metadata(output_batch, processed_req)
         is_warmup = is_warmup_req(processed_req)
         self._log_warmup_result(output_batch, processed_req, is_warmup)
 
@@ -1250,8 +1004,6 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
 
         if not self._dynamic_batching_enabled():
             identity, req, enqueue_time = self.waiting_queue.popleft()
-            now = time.monotonic()
-            self._observe_realtime_scheduler_queue(req, enqueue_time, now=now)
             if isinstance(req, Req):
                 output_count = max(1, int(req.num_outputs_per_prompt or 1))
                 self._record_batch_dispatch_metrics(
@@ -1272,8 +1024,6 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
         # (e.g., image-conditioned i2i request), dispatch it immediately.
         if not self._can_dynamic_batch(req, req):
             identity, req, head_enqueue_time = self.waiting_queue.popleft()
-            now = time.monotonic()
-            self._observe_realtime_scheduler_queue(req, head_enqueue_time, now=now)
             reject_reasons: list[str] = []
             if self._batch_metrics_enabled:
                 reason = self._get_dynamic_batch_reject_reason(req, req)
@@ -1330,13 +1080,9 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
             return None
 
         batch_items: list[tuple[bytes | None, Any]] = [None] * batch_len
-        dispatch_now = time.monotonic()
         for pos, idx in enumerate(reversed(compatible_indices)):
-            item_identity, item_req, item_enqueue_time = self.waiting_queue[idx]
+            item_identity, item_req, _ = self.waiting_queue[idx]
             batch_items[batch_len - 1 - pos] = (item_identity, item_req)
-            self._observe_realtime_scheduler_queue(
-                item_req, item_enqueue_time, now=dispatch_now
-            )
             del self.waiting_queue[idx]
         stop_reason = self._batch_admission.limit_reason_for_batch(compatible_reqs)
         if stop_reason is None:
@@ -1462,7 +1208,9 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
                 new_reqs = self.recv_reqs()
                 new_reqs = self.process_received_reqs_with_req_based_warmup(new_reqs)
                 now = time.monotonic()
-                self._enqueue_received_reqs(new_reqs, now=now)
+                self.waiting_queue.extend(
+                    [(identity, req, now) for identity, req in new_reqs]
+                )
                 # Reset error count on success
                 self._consecutive_error_count = 0
             except Exception as e:
@@ -1495,8 +1243,6 @@ class Scheduler(SchedulerWarmupMixin, SchedulerPostTrainingMixin, SchedulerDisag
                     elif remaining_ms > 0:
                         time.sleep(remaining_ms / 1000.0)
                 continue
-
-            self._mark_realtime_requests_dispatched(items, now=time.monotonic())
 
             try:
                 with maybe_record_function(

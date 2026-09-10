@@ -62,16 +62,16 @@ class MinWMVideoArchConfig(DiTArchConfig):
     pos_embed_seq_len: int | None = None
     exclude_lora_layers: list[str] = field(default_factory=lambda: ["embedder"])
 
-    local_attn_size: int = 97
-    sink_size: int = 9
-    rope_position_mode: str = "absolute"
-    rope_max_frame_gap: int = 1
-    prompt_first_frame_pin_enabled: bool = False
+    local_attn_size: int = 32
+    sink_size: int = 8
+    rope_position_mode: str = "block_relative"
+    rope_max_frame_gap: int = 12
+    prompt_first_frame_pin_enabled: bool = True
     scene_cut_rope_offset: int = 0
     scene_cut_sink_enabled: bool = False
     num_frame_first_block: int = 1
     num_frames_per_block: int = 4
-    sliding_window_num_frames: int = 97
+    sliding_window_num_frames: int = 32
     action_type: str = "primitive_token_residual"
     action_embed_dim: int = 256
     action_hidden_dim: int = 512

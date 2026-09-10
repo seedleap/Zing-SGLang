@@ -11,7 +11,7 @@ their respective code and artifacts.
 | Zing-0.5 | https://github.com/seedleap/zing-world-model | Apache-2.0 | Public model architecture, checkpoint contract, and reference inference behavior |
 | minWM | https://github.com/shengshu-ai/minWM | Apache-2.0 for the Wan implementation used here; see its component-level third-party notices | Causal world-model and action-conditioning reference |
 | Wan | https://github.com/Wan-Video/Wan2.1 | Apache-2.0 | Transformer and VAE architecture lineage |
-| TAEHV | https://github.com/madebyollin/taehv | MIT | Optional approximate realtime VAE backend; no checkpoint is bundled in this source tree |
+| TAEHV | https://github.com/madebyollin/taehv | MIT | Default local realtime decoder; its checkpoint is downloaded separately |
 
 The Zing integration was modified for SGLang's component loader, realtime
 WebSocket API, causal cache management, distributed runtime, and optimized CUDA

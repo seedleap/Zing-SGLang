@@ -383,15 +383,78 @@ class ComponentLoader(ABC):
                 f"Component attention backend for {component_attn_name!r} no longer "
                 f"matches the explicit request {requested_backend!r}"
             )
-        if component_name in getattr(
+        native_required_by_pipeline = component_name in getattr(
             server_args.pipeline_config, "native_component_names", ()
-        ):
-            if component_weight_override is not None:
-                raise ComponentCheckpointUnsupportedError(
-                    f"{component_name!r} requires its native loader, which cannot "
-                    "consume a weights-only override"
+        )
+        try:
+            if native_required_by_pipeline:
+                raise NativeComponentLoaderRequired(
+                    f"Pipeline requires the native {component_name} implementation"
                 )
+            component = self._load_customized_with_context(
+                component_model_path,
+                server_args,
+                component_name,
+                component_attn_backend,
+                component_attn_name,
+                require_backend_selection,
+            )
+            source = "sgl-diffusion"
+        except (
+            ComponentAttentionBackendNotAppliedError,
+            ComponentCheckpointUnsupportedError,
+            ComponentResidencyError,
+        ):
+            raise
+        except Exception as e:
+            if (
+                require_backend_selection or not allow_native_fallback
+            ) and not native_required_by_pipeline:
+                raise
+            native_loader_required = isinstance(e, NativeComponentLoaderRequired)
+            if native_loader_required and component_weight_override is not None:
+                raise ComponentCheckpointUnsupportedError(
+                    f"{component_name!r} requires its library loader, which cannot "
+                    "consume a weights-only override; use "
+                    f"--component-paths.{component_name} to replace its config "
+                    "and weights together"
+                ) from e
+            if (
+                component_weight_override is not None
+                or (
+                    not native_required_by_pipeline
+                    and self.should_raise_customized_load_error(
+                        server_args, component_name
+                    )
+                )
+            ):
+                if native_loader_required:
+                    raise
+                if component_weight_override is not None:
+                    raise RuntimeError(
+                        f"Failed to load the weights-only override for "
+                        f"{component_name!r}; fallback would ignore it. Use "
+                        f"--component-paths.{component_name} when the checkpoint "
+                        "also requires a different config or library loader."
+                    ) from e
+                traceback.print_exc()
+                raise RuntimeError(
+                    f"Failed to load customized {component_name}; native fallback "
+                    "is disabled for this component configuration."
+                ) from e
             self.validate_native_fallback(server_args, component_name)
+            if native_loader_required:
+                logger.info("%s", e)
+            elif "Unsupported model architecture" in str(e):
+                logger.info(
+                    f"Component: {component_name} doesn't have a customized version yet, using native version"
+                )
+            else:
+                traceback.print_exc()
+                logger.error(
+                    f"Error while loading customized {component_name}, falling back to native version"
+                )
+            # fallback to native version
             component = self._load_native_with_context(
                 component_model_path,
                 server_args,
@@ -401,88 +464,12 @@ class ComponentLoader(ABC):
                 component_attn_name,
                 require_backend_selection,
             )
-            source = "native-required"
-            logger.info(
-                "Pipeline numerical contract requires native %s: %s",
+            source = "native-required" if native_required_by_pipeline else "native"
+            logger.warning(
+                "Native component %s: %s is loaded, performance may be sub-optimal",
                 component_name,
                 component.__class__.__name__,
             )
-        else:
-            try:
-                component = self._load_customized_with_context(
-                    component_model_path,
-                    server_args,
-                    component_name,
-                    component_attn_backend,
-                    component_attn_name,
-                    require_backend_selection,
-                )
-                source = "sgl-diffusion"
-            except (
-                ComponentAttentionBackendNotAppliedError,
-                ComponentCheckpointUnsupportedError,
-                ComponentResidencyError,
-            ):
-                raise
-            except Exception as e:
-                if require_backend_selection or not allow_native_fallback:
-                    raise
-                native_loader_required = isinstance(e, NativeComponentLoaderRequired)
-                if native_loader_required and component_weight_override is not None:
-                    raise ComponentCheckpointUnsupportedError(
-                        f"{component_name!r} requires its library loader, which cannot "
-                        "consume a weights-only override; use "
-                        f"--component-paths.{component_name} to replace its config "
-                        "and weights together"
-                    ) from e
-                if (
-                    component_weight_override is not None
-                    or self.should_raise_customized_load_error(
-                        server_args, component_name
-                    )
-                ):
-                    if native_loader_required:
-                        raise
-                    if component_weight_override is not None:
-                        raise RuntimeError(
-                            f"Failed to load the weights-only override for "
-                            f"{component_name!r}; fallback would ignore it. Use "
-                            f"--component-paths.{component_name} when the checkpoint "
-                            "also requires a different config or library loader."
-                        ) from e
-                    traceback.print_exc()
-                    raise RuntimeError(
-                        f"Failed to load customized {component_name}; native fallback "
-                        "is disabled for this component configuration."
-                    ) from e
-                self.validate_native_fallback(server_args, component_name)
-                if native_loader_required:
-                    logger.info("%s", e)
-                elif "Unsupported model architecture" in str(e):
-                    logger.info(
-                        f"Component: {component_name} doesn't have a customized version yet, using native version"
-                    )
-                else:
-                    traceback.print_exc()
-                    logger.error(
-                        f"Error while loading customized {component_name}, falling back to native version"
-                    )
-                # fallback to native version
-                component = self._load_native_with_context(
-                    component_model_path,
-                    server_args,
-                    component_name,
-                    transformers_or_diffusers,
-                    component_attn_backend,
-                    component_attn_name,
-                    require_backend_selection,
-                )
-                source = "native"
-                logger.warning(
-                    "Native component %s: %s is loaded, performance may be sub-optimal",
-                    component_name,
-                    component.__class__.__name__,
-                )
 
         if component is None:
             logger.error("Load %s failed", component_name)
