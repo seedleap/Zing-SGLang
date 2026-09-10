@@ -53,8 +53,8 @@ from sglang.multimodal_gen.runtime.realtime.control_signals import (
 )
 from sglang.multimodal_gen.runtime.realtime.session import (
     BaseRealtimeState,
-    RealtimeSessionCapacityError,
     RealtimeSessionCache,
+    RealtimeSessionCapacityError,
 )
 from sglang.multimodal_gen.runtime.realtime.states import (
     RealtimeCausalDecodeState,

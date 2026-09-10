@@ -419,14 +419,9 @@ class ComponentLoader(ABC):
                     f"--component-paths.{component_name} to replace its config "
                     "and weights together"
                 ) from e
-            if (
-                component_weight_override is not None
-                or (
-                    not native_required_by_pipeline
-                    and self.should_raise_customized_load_error(
-                        server_args, component_name
-                    )
-                )
+            if component_weight_override is not None or (
+                not native_required_by_pipeline
+                and self.should_raise_customized_load_error(server_args, component_name)
             ):
                 if native_loader_required:
                     raise
