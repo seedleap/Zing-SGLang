@@ -27,6 +27,11 @@ From this repository:
 ```bash
 SGLANG_BUILD_RUST_EXTS=none \
   python -m pip install -e "python[diffusion]"
+```
+
+The 32 GiB profile additionally uses the optional TAEHV decoder:
+
+```bash
 python -m pip install \
   "taehv @ git+https://github.com/madebyollin/taehv.git@093b918971d59001a0bad6dfd6e0409b5e1752cf"
 ```
@@ -37,7 +42,11 @@ python -m pip install \
 modelscope download \
   --model seedleap/Zing-0.5-SGLang \
   --local_dir ./models/Zing-0.5-SGLang
+```
 
+Only the 32 GiB profile needs the TAEHV checkpoint:
+
+```bash
 curl -L \
   https://raw.githubusercontent.com/madebyollin/taehv/093b918971d59001a0bad6dfd6e0409b5e1752cf/taew2_2.pth \
   -o ./models/Zing-0.5-SGLang/taew2_2.pth
@@ -49,9 +58,9 @@ and tensor summary without recording private filesystem paths.
 
 ## Launch
 
-The bundled launcher uses the local TAEHV decoder and the online cache/RoPE
-defaults (`block_relative`, gap `12`, window `32`, sink `8`, and first-frame
-prompt pinning):
+The default `highmem` profile uses the model's native Wan VAE and the same
+causal-cache contract as the public ModelScope implementation (window `97`,
+sink `9`):
 
 ```bash
 ZING_MODEL_PATH=./models/Zing-0.5-SGLang \
@@ -71,14 +80,14 @@ The equivalent explicit commands are shown below.
 Recommended profile for an H100/H200-class GPU with at least 80 GiB:
 
 ```bash
-python -m sglang.multimodal_gen.runtime.launch_server \
+MINWM_VAE_LANE=parity \
+  python -m sglang.multimodal_gen.runtime.launch_server \
   --model-path ./models/Zing-0.5-SGLang \
   --pipeline-class-name ZingCausalDMDPipeline \
   --attention-backend fa \
   --performance-mode speed \
-  --vae-config.taehv-checkpoint-path ./models/Zing-0.5-SGLang/taew2_2.pth \
-  --realtime-causal-kv-cache-num-frames 32 \
-  --realtime-causal-sink-size 8 \
+  --realtime-causal-kv-cache-num-frames 97 \
+  --realtime-causal-sink-size 9 \
   --host 0.0.0.0 \
   --port 30000
 ```
@@ -86,7 +95,8 @@ python -m sglang.multimodal_gen.runtime.launch_server \
 For a 32 GiB GPU, begin with CPU offload:
 
 ```bash
-python -m sglang.multimodal_gen.runtime.launch_server \
+MINWM_VAE_LANE=parallel \
+  python -m sglang.multimodal_gen.runtime.launch_server \
   --model-path ./models/Zing-0.5-SGLang \
   --pipeline-class-name ZingCausalDMDPipeline \
   --attention-backend fa \
@@ -110,8 +120,8 @@ python examples/zing_0_5/client.py \
   --output outputs/forest
 ```
 
-The client inherits the server's `32/8` cache defaults unless `--window` or
-`--sink` is explicitly supplied.
+The client inherits the selected server profile's cache defaults unless
+`--window` or `--sink` is explicitly supplied.
 
 For I2V, add a local PNG, JPEG, or WebP image:
 
