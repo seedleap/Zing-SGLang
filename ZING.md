@@ -121,35 +121,6 @@ static browser demo under
 `python/sglang/multimodal_gen/apps/realtime_webui/` can be served with any local
 HTTP server.
 
-## Convert the original public release
-
-If you downloaded the original PyTorch-layout release instead of the serving
-artifact:
-
-```bash
-python -m sglang.multimodal_gen.tools.convert_zing_checkpoint \
-  --zing-dir ./models/Zing-0.5 \
-  --output-dir ./models/Zing-0.5-SGLang
-```
-
-`--zing-dir` must contain `generator/model.pt` and
-`pretrained/{text_encoder,tokenizer,vae}`. The DMD scheduler is created by the
-runtime and is not required in either directory. The converter memory-maps the
-PyTorch checkpoint and writes one shard at a time, so peak host memory is
-bounded by the selected `--max-shard-gib` rather than the full generator size.
-
-Before publishing the converted directory, run the release gate and generate
-checksums:
-
-```bash
-python -m sglang.multimodal_gen.tools.verify_zing_artifact \
-  ./models/Zing-0.5-SGLang \
-  --write-sha256
-```
-
-The verifier rejects missing or mismatched shards, symlinks, unexpected model
-identifiers, and private storage paths in the conversion metadata.
-
 ## License and provenance
 
 The fork is Apache-2.0. See [THIRD_PARTY_NOTICES_ZING.md](THIRD_PARTY_NOTICES_ZING.md)
