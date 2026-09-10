@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <type_traits>
 
+namespace sglang {
+
 namespace {
 
 struct MinWMRMSNormParams {
@@ -213,3 +215,5 @@ struct MinWMFusedQKNormKernel {
 };
 
 }  // namespace
+
+}  // namespace sglang

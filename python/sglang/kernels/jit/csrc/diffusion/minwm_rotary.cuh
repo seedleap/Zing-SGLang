@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <type_traits>
 
+namespace sglang {
+
 namespace {
 
 constexpr uint32_t kMinWMHeadDim = 128;
@@ -145,3 +147,5 @@ struct MinWMRotaryKernel {
 };
 
 }  // namespace
+
+}  // namespace sglang
