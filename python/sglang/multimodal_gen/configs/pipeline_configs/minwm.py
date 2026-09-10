@@ -235,6 +235,24 @@ class MinWMCausalDMDConfig(Wan2_2_TI2V_5B_Config):
     realtime_causal_kv_cache_pool_size: int | None = None
     realtime_causal_kv_cache_pool_buckets: str | None = None
 
+    def tokenize_prompt(self, prompt: list[str], tokenizer, tok_kwargs):
+        # Zing main pads to the longest prompt first, then enforces a 512-token
+        # floor. Running UMT5 over a fixed 1024-token grid changes BF16 kernel
+        # rounding even though the extra padding is masked out.
+        tokens = tokenizer(prompt, **(tok_kwargs | {"padding": "longest"}))
+        sequence_length = tokens["input_ids"].shape[1]
+        if sequence_length < 512:
+            padding = 512 - sequence_length
+            tokens["input_ids"] = torch.nn.functional.pad(
+                tokens["input_ids"],
+                (0, padding),
+                value=tokenizer.pad_token_id,
+            )
+            tokens["attention_mask"] = torch.nn.functional.pad(
+                tokens["attention_mask"], (0, padding)
+            )
+        return tokens
+
     @staticmethod
     def _native_vae_stats(latents: torch.Tensor, vae):
         mean = torch.tensor(

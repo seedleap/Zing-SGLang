@@ -1889,6 +1889,33 @@ def test_minwm_native_hf_text_output_uses_tokenizer_attention_mask():
     assert torch.count_nonzero(output.prompt_embeds[:, 23:]).item() == 0
 
 
+def test_minwm_tokenization_matches_main_dynamic_padding_contract():
+    calls = []
+
+    class FakeTokenizer:
+        pad_token_id = 7
+
+        def __call__(self, prompt, **kwargs):
+            calls.append((prompt, kwargs))
+            return {
+                "input_ids": torch.tensor([[11, 12, 13]]),
+                "attention_mask": torch.ones(1, 3, dtype=torch.long),
+            }
+
+    config = MinWMCausalDMDConfig()
+    tokenizer = FakeTokenizer()
+    tokens = config.tokenize_prompt(
+        ["hello"], tokenizer, config.text_encoder_configs[0].tokenizer_kwargs
+    )
+
+    assert calls[0][1]["padding"] == "longest"
+    assert calls[0][1]["max_length"] == 1024
+    assert tokens["input_ids"].shape == (1, 512)
+    assert tokens["attention_mask"].shape == (1, 512)
+    assert tokens["input_ids"][0, 3:].eq(tokenizer.pad_token_id).all()
+    assert tokens["attention_mask"][0, 3:].eq(0).all()
+
+
 def test_minwm_requires_baseline_native_text_and_vae_components():
     config = MinWMCausalDMDConfig()
     assert config.native_component_names == ("text_encoder", "vae")
