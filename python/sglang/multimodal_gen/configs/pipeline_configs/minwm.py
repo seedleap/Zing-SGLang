@@ -33,11 +33,11 @@ MINWM_VAE_LANES = ("parity", "parallel")
 
 
 def _minwm_native_component_names() -> tuple[str, ...]:
-    vae_lane = os.environ.get("MINWM_VAE_LANE")
+    vae_lane = os.environ.get("ZING_VAE_LANE") or os.environ.get("MINWM_VAE_LANE")
     if vae_lane is not None:
         if vae_lane not in MINWM_VAE_LANES:
             raise ValueError(
-                f"MINWM_VAE_LANE must be one of {MINWM_VAE_LANES}, got {vae_lane!r}"
+                f"ZING_VAE_LANE must be one of {MINWM_VAE_LANES}, got {vae_lane!r}"
             )
         # The explicit lane takes precedence over the legacy component list so
         # benchmark manifests cannot accidentally mix parity and speed modes.

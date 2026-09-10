@@ -1029,6 +1029,7 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
 
 
 class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
+    _aliases = ["ZingCausalTransformer3DModel"]
     transformer_block_cls = MinWMCausalTransformerBlock
     patch_embedding_cls = MinWMPatchEmbed
     param_names_mapping = MinWMVideoConfig().param_names_mapping

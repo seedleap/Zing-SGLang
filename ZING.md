@@ -14,8 +14,8 @@ through SGLang's realtime WebSocket API and supports:
 
 - Linux and an NVIDIA CUDA GPU;
 - Python 3.11;
-- at least 32 GiB GPU memory for the conservative offload profile;
-- at least 80 GiB GPU memory for the recommended resident profile.
+- an H100/H200-class GPU for the resident profile, or begin with the `32g`
+  offload profile on a 32 GiB GPU.
 
 The memory thresholds are starting profiles, not substitutes for checking the
 actual memory reported by the device.
@@ -29,7 +29,7 @@ SGLANG_BUILD_RUST_EXTS=none \
   python -m pip install -e "python[diffusion]"
 ```
 
-The 32 GiB profile additionally uses the optional TAEHV decoder:
+Both launch profiles use the optional TAEHV decoder:
 
 ```bash
 python -m pip install \
@@ -44,23 +44,33 @@ modelscope download \
   --local_dir ./models/Zing-0.5-SGLang
 ```
 
-Only the 32 GiB profile needs the TAEHV checkpoint:
+Download its pinned checkpoint separately:
 
 ```bash
 curl -L \
   https://raw.githubusercontent.com/madebyollin/taehv/093b918971d59001a0bad6dfd6e0409b5e1752cf/taew2_2.pth \
   -o ./models/Zing-0.5-SGLang/taew2_2.pth
+
+echo "d053e216ca50e2bb837bbcd79b85f0366bea00e5938025572382a773b74c559a  ./models/Zing-0.5-SGLang/taew2_2.pth" \
+  | sha256sum --check
 ```
 
-The serving artifact is a sharded safetensors conversion of the public
-`seedleap/Zing-0.5` release. Its conversion manifest records the public source
-and tensor summary without recording private filesystem paths.
+The public `seedleap/Zing-0.5` release stores its generator as
+`generator/model.pt`; its text encoder and VAE already use safetensors. This
+serving repository converts only the generator to sharded safetensors for
+SGLang loading. Tensor values are unchanged; the file layout and loading
+metadata differ. `zing_conversion_manifest.json` records the public source and
+tensor summary without private filesystem paths.
+
+Public model and pipeline names use `Zing`. A few `MinWM` identifiers remain
+inside the implementation and as compatibility aliases because Zing evolved
+from minWM; users do not need to reference them.
 
 ## Launch
 
-The default `highmem` profile uses the model's native Wan VAE and the same
-causal-cache contract as the public ModelScope implementation (window `97`,
-sink `9`):
+The bundled launcher uses the local TAEHV decoder and the online cache/RoPE
+configuration: `block_relative`, maximum frame gap `12`, window `32`, sink `8`,
+and first-frame prompt pinning.
 
 ```bash
 ZING_MODEL_PATH=./models/Zing-0.5-SGLang \
@@ -77,17 +87,18 @@ ZING_PROFILE=32g \
 
 The equivalent explicit commands are shown below.
 
-Recommended profile for an H100/H200-class GPU with at least 80 GiB:
+Resident profile for an H100/H200-class GPU:
 
 ```bash
-MINWM_VAE_LANE=parity \
+ZING_VAE_LANE=parallel \
   python -m sglang.multimodal_gen.runtime.launch_server \
   --model-path ./models/Zing-0.5-SGLang \
   --pipeline-class-name ZingCausalDMDPipeline \
   --attention-backend fa \
   --performance-mode speed \
-  --realtime-causal-kv-cache-num-frames 97 \
-  --realtime-causal-sink-size 9 \
+  --vae-config.taehv-checkpoint-path ./models/Zing-0.5-SGLang/taew2_2.pth \
+  --realtime-causal-kv-cache-num-frames 32 \
+  --realtime-causal-sink-size 8 \
   --host 0.0.0.0 \
   --port 30000
 ```
@@ -95,7 +106,7 @@ MINWM_VAE_LANE=parity \
 For a 32 GiB GPU, begin with CPU offload:
 
 ```bash
-MINWM_VAE_LANE=parallel \
+ZING_VAE_LANE=parallel \
   python -m sglang.multimodal_gen.runtime.launch_server \
   --model-path ./models/Zing-0.5-SGLang \
   --pipeline-class-name ZingCausalDMDPipeline \
@@ -120,8 +131,8 @@ python examples/zing_0_5/client.py \
   --output outputs/forest
 ```
 
-The client inherits the selected server profile's cache defaults unless
-`--window` or `--sink` is explicitly supplied.
+The client inherits the server's `32/8` cache defaults unless `--window` or
+`--sink` is explicitly supplied.
 
 For I2V, add a local PNG, JPEG, or WebP image:
 

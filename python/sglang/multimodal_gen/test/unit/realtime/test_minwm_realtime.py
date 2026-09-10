@@ -1923,7 +1923,7 @@ def test_minwm_requires_baseline_native_text_and_vae_components():
 
 
 def test_minwm_explicit_parallel_vae_lane_uses_sglang_vae(monkeypatch):
-    monkeypatch.setenv("MINWM_VAE_LANE", "parallel")
+    monkeypatch.setenv("ZING_VAE_LANE", "parallel")
     monkeypatch.setenv("MINWM_NATIVE_COMPONENTS", "text_encoder,vae")
 
     config = MinWMCausalDMDConfig()
@@ -1933,7 +1933,7 @@ def test_minwm_explicit_parallel_vae_lane_uses_sglang_vae(monkeypatch):
 
 
 def test_minwm_explicit_parity_vae_lane_uses_native_vae(monkeypatch):
-    monkeypatch.setenv("MINWM_VAE_LANE", "parity")
+    monkeypatch.setenv("ZING_VAE_LANE", "parity")
     monkeypatch.setenv("MINWM_NATIVE_COMPONENTS", "")
 
     config = MinWMCausalDMDConfig()
@@ -1942,14 +1942,15 @@ def test_minwm_explicit_parity_vae_lane_uses_native_vae(monkeypatch):
 
 
 def test_minwm_rejects_unknown_vae_lane(monkeypatch):
-    monkeypatch.setenv("MINWM_VAE_LANE", "unknown")
+    monkeypatch.setenv("ZING_VAE_LANE", "unknown")
 
-    with pytest.raises(ValueError, match="MINWM_VAE_LANE"):
+    with pytest.raises(ValueError, match="ZING_VAE_LANE"):
         MinWMCausalDMDConfig()
 
 
 def test_zing_public_pipeline_uses_online_runtime_defaults():
     assert issubclass(ZingCausalDMDPipeline, MinWMCausalDMDPipeline)
+    assert "ZingCausalTransformer3DModel" in MinWMCausalTransformer3DModel._aliases
     arch_config = MinWMVideoArchConfig()
     assert (arch_config.local_attn_size, arch_config.sink_size) == (32, 8)
     assert arch_config.sliding_window_num_frames == 32
