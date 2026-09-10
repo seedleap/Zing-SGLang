@@ -25,7 +25,8 @@ actual memory reported by the device.
 From this repository:
 
 ```bash
-python -m pip install -e "python[diffusion]"
+SGLANG_BUILD_RUST_EXTS=none \
+  python -m pip install -e "python[diffusion]"
 python -m pip install \
   "taehv @ git+https://github.com/madebyollin/taehv.git@093b918971d59001a0bad6dfd6e0409b5e1752cf"
 ```
