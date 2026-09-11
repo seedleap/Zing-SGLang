@@ -8,11 +8,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sglang.multimodal_gen.configs.models.dits.minwm import (
+from sglang.multimodal_gen.configs.models.dits.zing import (
     MinWMVideoArchConfig,
     MinWMVideoConfig,
 )
-from sglang.multimodal_gen.configs.pipeline_configs.minwm import (
+from sglang.multimodal_gen.configs.pipeline_configs.zing import (
     MINWM_ACTION_LABELS_CONDITION,
     MINWM_ACTION_WEIGHTS_CONDITION,
     MINWM_CHUNK_SEED_CONDITION,
@@ -24,15 +24,15 @@ from sglang.multimodal_gen.configs.pipeline_configs.minwm import (
     MinWMCausalDMDConfig,
     minwm_t5_postprocess_text,
 )
-from sglang.multimodal_gen.configs.sample.minwm import MinWMSamplingParams
+from sglang.multimodal_gen.configs.sample.zing import MinWMSamplingParams
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
     RealtimeVideoGenerationsRequest,
 )
-from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.adapters.minwm_realtime_adapter import (
+from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.adapters.zing_realtime_adapter import (
     MinWMRealtimeAdapter,
     MinWMRealtimeState,
 )
-from sglang.multimodal_gen.runtime.models.dits.minwm import (
+from sglang.multimodal_gen.runtime.models.dits.zing import (
     MinWMCausalSelfAttention,
     MinWMCausalTransformer3DModel,
     MinWMPatchEmbed,
@@ -54,7 +54,7 @@ from sglang.multimodal_gen.runtime.models.dits.minwm import (
     apply_minwm_rotary_embedding,
     apply_minwm_rotary_embedding_out,
 )
-from sglang.multimodal_gen.runtime.models.dits.minwm_action import (
+from sglang.multimodal_gen.runtime.models.dits.zing_action import (
     PrimitiveRoPETokenResidualActionEncoder,
     PrimitiveTokenResidualActionEncoder,
     action_labels_to_primitive_bits,
@@ -62,16 +62,16 @@ from sglang.multimodal_gen.runtime.models.dits.minwm_action import (
     validate_action_labels,
     validate_action_weights,
 )
-from sglang.multimodal_gen.runtime.models.dits.minwm_kv_cache import (
+from sglang.multimodal_gen.runtime.models.dits.zing_kv_cache import (
     MinWMCausalSelfAttentionKVCache,
 )
-from sglang.multimodal_gen.runtime.pipelines.minwm_causal_dmd_pipeline import (
+from sglang.multimodal_gen.runtime.pipelines.zing_causal_dmd_pipeline import (
     MinWMCausalDMDPipeline,
     MinWMCausalUniPCPipeline,
     ZingCausalDMDPipeline,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
-from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm.minwm_causal_denoising import (
+from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing.zing_causal_denoising import (
     MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE,
     MinWMCausalDMDDenoisingStage,
     MinWMCausalUniPCDenoisingStage,
@@ -175,13 +175,13 @@ def _runtime_alignment_json(log_calls):
 def test_minwm_runtime_alignment_validates_all_30_layers_without_hardcoding_config(
     monkeypatch,
 ):
-    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
-        minwm_causal_denoising,
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing import (
+        zing_causal_denoising,
     )
 
     log_calls = []
     monkeypatch.setattr(
-        minwm_causal_denoising,
+        zing_causal_denoising,
         "logger",
         SimpleNamespace(info=lambda *args: log_calls.append(args)),
     )
@@ -206,13 +206,13 @@ def test_minwm_runtime_alignment_validates_all_30_layers_without_hardcoding_conf
 
 
 def test_minwm_runtime_alignment_reports_layer_17_mismatch(monkeypatch):
-    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
-        minwm_causal_denoising,
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing import (
+        zing_causal_denoising,
     )
 
     log_calls = []
     monkeypatch.setattr(
-        minwm_causal_denoising,
+        zing_causal_denoising,
         "logger",
         SimpleNamespace(info=lambda *args: log_calls.append(args)),
     )
@@ -999,7 +999,7 @@ def test_minwm_forward_impl_prepares_action_residual_once_per_chunk():
 
 
 def test_minwm_bounded_session_presamples_reference_and_full_horizon(monkeypatch):
-    import sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm.minwm_causal_denoising as stage_module
+    import sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing.zing_causal_denoising as stage_module
 
     monkeypatch.setattr(
         stage_module, "get_local_torch_device", lambda: torch.device("cpu")
@@ -1073,7 +1073,7 @@ def test_minwm_t2v_uses_first_regular_and_remainder_chunk_sizes():
 
 
 def test_minwm_t2v_presamples_exact_horizon_without_reference_slot(monkeypatch):
-    import sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm.minwm_causal_denoising as stage_module
+    import sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing.zing_causal_denoising as stage_module
 
     monkeypatch.setattr(
         stage_module, "get_local_torch_device", lambda: torch.device("cpu")
@@ -1134,7 +1134,7 @@ def test_minwm_t2v_presamples_exact_horizon_without_reference_slot(monkeypatch):
 
 
 def test_minwm_director_chunk_seed_replays_prefix_rng_before_tail(monkeypatch):
-    import sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm.minwm_causal_denoising as stage_module
+    import sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing.zing_causal_denoising as stage_module
 
     monkeypatch.setattr(
         stage_module, "get_local_torch_device", lambda: torch.device("cpu")
@@ -1529,8 +1529,8 @@ def test_minwm_cuda_graph_key_separates_both_720p_shapes():
 
 
 def test_minwm_sequence_shard_forward_bypasses_cuda_graph(monkeypatch):
-    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
-        minwm_causal_denoising as denoising_module,
+    from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing import (
+        zing_causal_denoising as denoising_module,
     )
 
     class Transformer:
@@ -2098,7 +2098,7 @@ def test_minwm_5090_profile_rejects_720p_before_pipeline_work(monkeypatch, width
 
 
 def test_minwm_sequence_shard_frame_indices_support_mid_frame_boundaries(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
 
     forward_batch = SimpleNamespace(
         enable_sequence_shard=True,
@@ -2266,7 +2266,7 @@ def test_minwm_output_projection_reference_bucket_policy(
 
 
 def test_minwm_causal_cache_uses_local_ulysses_heads(monkeypatch):
-    import sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm.minwm_causal_denoising as stage_module
+    import sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing.zing_causal_denoising as stage_module
 
     stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
     stage.transformer = SimpleNamespace(
@@ -2435,7 +2435,7 @@ def test_minwm_ulysses_qkv_peer_first_layout_round_trips_exactly(monkeypatch):
 
 @pytest.mark.parametrize("seq_splits", [(2, 2), (3, 2)])
 def test_minwm_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_splits):
-    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
 
     local_seq = seq_splits[0]
     global_seq = sum(seq_splits)
@@ -2578,7 +2578,7 @@ def test_minwm_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_sp
 def test_minwm_attention_backend_matches_source_device_fallback(
     monkeypatch, capability, available, expected
 ):
-    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
 
     monkeypatch.setattr(
         minwm_module.torch.cuda,
@@ -2594,7 +2594,7 @@ def test_minwm_attention_backend_matches_source_device_fallback(
 
 
 def test_minwm_hopper_requires_fa3(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
 
     monkeypatch.setattr(
         minwm_module.torch.cuda,
@@ -2612,7 +2612,7 @@ def test_minwm_hopper_requires_fa3(monkeypatch):
 
 
 def test_minwm_strict_sm120_requires_fa4(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
 
     monkeypatch.setenv("SGLANG_MINWM_REQUIRE_SM120_FA4", "1")
     monkeypatch.setattr(
@@ -2632,7 +2632,7 @@ def test_minwm_strict_sm120_requires_fa4(monkeypatch):
 
 def test_minwm_hopper_attention_uses_sglang_fa3_api(monkeypatch):
     import sglang.kernels.ops.attention.flash_attention_v3 as fa3_module
-    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
 
     class FakeCudaTensor:
         def __init__(self, shape):
@@ -2850,7 +2850,7 @@ def test_minwm_fused_segments_match_main_eager_formulas():
 
 
 def test_minwm_cache_qk_norm_stays_eager(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
 
     compile_calls = []
 
@@ -2892,7 +2892,7 @@ def test_minwm_cache_qk_norm_stays_eager(monkeypatch):
 
 
 def test_minwm_cuda_graph_disables_segment_compile(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
 
     def operation(value):
         return value
@@ -2929,7 +2929,7 @@ def test_minwm_rotary_embedding_matches_main_explicit_formula():
 
 
 def test_minwm_rotary_embedding_dispatches_supported_hopper_inputs(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
 
     hidden = torch.randn(1, 5, 3, 8, dtype=torch.bfloat16)
     cos = torch.randn(5, 4)
@@ -2943,7 +2943,7 @@ def test_minwm_rotary_embedding_dispatches_supported_hopper_inputs(monkeypatch):
 
 
 def test_minwm_rotary_embedding_out_dispatches_supported_hopper_inputs(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
 
     hidden = torch.randn(1, 5, 3, 8, dtype=torch.bfloat16)
     cos = torch.randn(5, 4)
@@ -2972,7 +2972,7 @@ def test_minwm_rotary_embedding_out_fallback_writes_caller_tensor():
 
 
 def test_minwm_five_passes_rotate_q_five_times_and_full_k_once(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.minwm as minwm_module
+    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
 
     cache = _make_minwm_test_cache(cache_size=6, sink_tokens=0)
     _append_minwm_test_frames(cache, [0, 1], token_start=0)

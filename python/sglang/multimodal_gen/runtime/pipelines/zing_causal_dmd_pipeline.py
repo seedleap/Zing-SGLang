@@ -17,7 +17,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages import (
     DMDTimestepPreparationStage,
     TimestepPreparationStage,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
+from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing import (
     MinWMCausalDMDDenoisingStage,
     MinWMCausalUniPCDenoisingStage,
     MinWMCausalVaeDecodingStage,

@@ -8,16 +8,16 @@ import torch
 from sglang.multimodal_gen.runtime.layers.kvcache.causal_attention_cache import (
     CrossAttentionKVCache,
 )
-from sglang.multimodal_gen.runtime.models.dits.minwm_kv_cache import (
+from sglang.multimodal_gen.runtime.models.dits.zing_kv_cache import (
     MinWMCausalSelfAttentionKVCache,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.causal_denoising import (
     CausalDMDCachePolicy,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm import (
-    minwm_causal_denoising as minwm_stage_module,
+from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing import (
+    zing_causal_denoising as zing_stage_module,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.minwm.minwm_causal_denoising import (
+from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing.zing_causal_denoising import (
     MinWMCausalDMDDenoisingStage,
 )
 from sglang.multimodal_gen.runtime.realtime.causal_kv_cache_pool import (
@@ -187,12 +187,10 @@ def test_minwm_pool_is_fully_allocated_during_stage_initialization(monkeypatch):
         enable_cuda_graph=False,
     )
     monkeypatch.setattr(
-        minwm_stage_module, "get_local_torch_device", lambda: torch.device("cpu")
+        zing_stage_module, "get_local_torch_device", lambda: torch.device("cpu")
     )
-    monkeypatch.setattr(
-        minwm_stage_module, "get_ulysses_parallel_world_size", lambda: 1
-    )
-    monkeypatch.setattr(minwm_stage_module, "get_sp_parallel_rank", lambda: 0)
+    monkeypatch.setattr(zing_stage_module, "get_ulysses_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(zing_stage_module, "get_sp_parallel_rank", lambda: 0)
     allocations = []
 
     def fake_initialize_causal_caches(**kwargs):

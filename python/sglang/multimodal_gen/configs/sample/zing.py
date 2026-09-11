@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass, field
 
-from sglang.multimodal_gen.configs.minwm_resolution_buckets import (
+from sglang.multimodal_gen.configs.zing_resolution_buckets import (
     MINWM_RESOLUTION_BUCKETS,
     normalize_minwm_resolution_buckets,
 )

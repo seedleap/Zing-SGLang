@@ -22,7 +22,7 @@ from sglang.multimodal_gen.configs.models.vaes.stablediffusion3 import (
     StableDiffusion3VAEConfig,
 )
 from sglang.multimodal_gen.configs.models.vaes.wanvae import WanVAEConfig
-from sglang.multimodal_gen.configs.pipeline_configs.minwm import MinWMWan22VAEConfig
+from sglang.multimodal_gen.configs.pipeline_configs.zing import MinWMWan22VAEConfig
 from sglang.multimodal_gen.configs.utils import update_config_from_args
 from sglang.multimodal_gen.runtime.distributed import parallel_state
 from sglang.multimodal_gen.runtime.layers.parallel_conv import (

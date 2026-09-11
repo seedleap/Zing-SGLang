@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sglang.multimodal_gen.configs.pipeline_configs.minwm import (
+from sglang.multimodal_gen.configs.pipeline_configs.zing import (
     MINWM_ACTION_LABELS_CONDITION,
     MINWM_ACTION_WEIGHTS_CONDITION,
     MINWM_CHUNK_SEED_CONDITION,
@@ -29,7 +29,7 @@ from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.realtime_adapter 
     build_realtime_sampling_params,
     save_realtime_first_frame,
 )
-from sglang.multimodal_gen.runtime.models.dits.minwm_action import (
+from sglang.multimodal_gen.runtime.models.dits.zing_action import (
     key_state_to_action_label,
     validate_action_labels,
     validate_action_weights,

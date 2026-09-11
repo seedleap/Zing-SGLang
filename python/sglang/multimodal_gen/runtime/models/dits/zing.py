@@ -16,20 +16,20 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from sglang.kernels.ops.diffusion.norm.minwm_rmsnorm_jit import (
+from sglang.kernels.ops.diffusion.norm.zing_rmsnorm_jit import (
     can_use_minwm_rmsnorm,
     minwm_fused_qknorm,
     minwm_fused_qknorm_unchecked,
     minwm_rmsnorm,
     minwm_rmsnorm_unchecked,
 )
-from sglang.kernels.ops.diffusion.rope.minwm_rotary_jit import (
+from sglang.kernels.ops.diffusion.rope.zing_rotary_jit import (
     can_use_minwm_rotary,
     can_use_minwm_rotary_out,
     minwm_rotary,
     minwm_rotary_out,
 )
-from sglang.multimodal_gen.configs.models.dits.minwm import MinWMVideoConfig
+from sglang.multimodal_gen.configs.models.dits.zing import MinWMVideoConfig
 from sglang.multimodal_gen.runtime.distributed import (
     get_sp_group,
     get_sp_parallel_rank,
@@ -65,11 +65,11 @@ from sglang.multimodal_gen.runtime.models.dits.causal_wanvideo import (
     CausalWanTransformer3DModel,
     CausalWanTransformerBlock,
 )
-from sglang.multimodal_gen.runtime.models.dits.minwm_action import (
+from sglang.multimodal_gen.runtime.models.dits.zing_action import (
     PrimitiveRoPETokenResidualActionEncoder,
     PrimitiveTokenResidualActionEncoder,
 )
-from sglang.multimodal_gen.runtime.models.dits.minwm_kv_cache import (
+from sglang.multimodal_gen.runtime.models.dits.zing_kv_cache import (
     MinWMCausalAttentionKVPlan,
     MinWMCausalSelfAttentionKVCache,
 )

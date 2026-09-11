@@ -14,11 +14,11 @@ from typing import Any
 
 import torch
 
-from sglang.multimodal_gen.configs.minwm_resolution_buckets import (
+from sglang.multimodal_gen.configs.zing_resolution_buckets import (
     MINWM_RESOLUTION_BUCKETS,
     normalize_minwm_resolution_buckets,
 )
-from sglang.multimodal_gen.configs.pipeline_configs.minwm import (
+from sglang.multimodal_gen.configs.pipeline_configs.zing import (
     MINWM_ACTION_LABELS_CONDITION,
     MINWM_ACTION_WEIGHTS_CONDITION,
     MINWM_CHUNK_SEED_CONDITION,
@@ -38,14 +38,14 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_ulysses_parallel_world_size,
 )
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
-from sglang.multimodal_gen.runtime.models.dits.minwm import (
+from sglang.multimodal_gen.runtime.models.dits.zing import (
     set_minwm_cuda_graph_active,
 )
-from sglang.multimodal_gen.runtime.models.dits.minwm_action import (
+from sglang.multimodal_gen.runtime.models.dits.zing_action import (
     validate_action_labels,
     validate_action_weights,
 )
-from sglang.multimodal_gen.runtime.models.dits.minwm_kv_cache import (
+from sglang.multimodal_gen.runtime.models.dits.zing_kv_cache import (
     MinWMCausalAttentionKVPlan,
     MinWMCausalSelfAttentionKVCache,
 )

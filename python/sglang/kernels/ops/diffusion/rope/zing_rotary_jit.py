@@ -35,7 +35,7 @@ def _jit_minwm_rotary_module(dtype: torch.dtype) -> Module:
     return load_jit(
         "diffusion_minwm_rotary",
         *args,
-        cuda_files=["diffusion/minwm_rotary.cuh"],
+        cuda_files=["diffusion/zing_rotary.cuh"],
         cuda_wrappers=[
             ("minwm_rotary", f"MinWMRotaryKernel<{args}>::run"),
         ],

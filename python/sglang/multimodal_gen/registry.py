@@ -168,7 +168,7 @@ from sglang.multimodal_gen.configs.sample.minimax_h3 import (
     FastH3SamplingParams,
     MiniMaxH3SamplingParams,
 )
-from sglang.multimodal_gen.configs.sample.minwm import MinWMSamplingParams
+from sglang.multimodal_gen.configs.sample.zing import MinWMSamplingParams
 from sglang.multimodal_gen.configs.sample.mova import (
     MOVA_360P_SamplingParams,
     MOVA_720P_SamplingParams,

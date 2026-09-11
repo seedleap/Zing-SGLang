@@ -33,7 +33,7 @@ def _jit_minwm_rmsnorm_module(hidden_size: int, dtype: torch.dtype) -> Module:
     return load_jit(
         "diffusion_minwm_rmsnorm",
         *args,
-        cuda_files=["diffusion/minwm_rmsnorm.cuh"],
+        cuda_files=["diffusion/zing_rmsnorm.cuh"],
         cuda_wrappers=[
             ("minwm_rmsnorm", f"MinWMRMSNormKernel<{args}>::run"),
             ("minwm_fused_qknorm", f"MinWMFusedQKNormKernel<{args}>::run"),

@@ -47,7 +47,7 @@ from sglang.multimodal_gen.configs.pipeline_configs.minimax_h3 import (
     FastH3PipelineConfig,
     MiniMaxH3PipelineConfig,
 )
-from sglang.multimodal_gen.configs.pipeline_configs.minwm import MinWMCausalDMDConfig
+from sglang.multimodal_gen.configs.pipeline_configs.zing import MinWMCausalDMDConfig
 from sglang.multimodal_gen.configs.pipeline_configs.mova import MOVAPipelineConfig
 from sglang.multimodal_gen.configs.pipeline_configs.pi05 import Pi05PipelineConfig
 from sglang.multimodal_gen.configs.pipeline_configs.sana import SanaPipelineConfig

@@ -3,7 +3,7 @@ import sys
 import pytest
 import torch
 
-from sglang.kernels.ops.diffusion.rope.minwm_rotary_jit import (
+from sglang.kernels.ops.diffusion.rope.zing_rotary_jit import (
     can_use_minwm_rotary,
     can_use_minwm_rotary_out,
     minwm_rotary,

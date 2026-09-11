@@ -3,7 +3,7 @@ import sys
 import pytest
 import torch
 
-from sglang.kernels.ops.diffusion.norm.minwm_rmsnorm_jit import (
+from sglang.kernels.ops.diffusion.norm.zing_rmsnorm_jit import (
     can_use_minwm_rmsnorm,
     is_supported_minwm_rmsnorm_hidden_size,
     minwm_fused_qknorm,
@@ -150,7 +150,7 @@ def test_minwm_fused_qknorm_torch_compile_fullgraph() -> None:
 
 
 def test_minwm_model_qk_norm_integration() -> None:
-    from sglang.multimodal_gen.runtime.models.dits.minwm import _minwm_qk_norm_op
+    from sglang.multimodal_gen.runtime.models.dits.zing import _minwm_qk_norm_op
 
     query, key = _make_strided_qk(195, torch.bfloat16)
     query_weight = torch.randn(HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
