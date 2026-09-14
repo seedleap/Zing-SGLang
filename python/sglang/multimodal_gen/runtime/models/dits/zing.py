@@ -65,6 +65,7 @@ from sglang.multimodal_gen.runtime.models.dits.causal_wanvideo import (
     CausalWanTransformer3DModel,
     CausalWanTransformerBlock,
 )
+from sglang.multimodal_gen.runtime.models.dits.wanvideo import WanT2VCrossAttention
 from sglang.multimodal_gen.runtime.models.dits.zing_action import (
     PrimitiveRoPETokenResidualActionEncoder,
     PrimitiveTokenResidualActionEncoder,
@@ -73,7 +74,6 @@ from sglang.multimodal_gen.runtime.models.dits.zing_kv_cache import (
     MinWMCausalAttentionKVPlan,
     MinWMCausalSelfAttentionKVCache,
 )
-from sglang.multimodal_gen.runtime.models.dits.wanvideo import WanT2VCrossAttention
 from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
     current_platform,

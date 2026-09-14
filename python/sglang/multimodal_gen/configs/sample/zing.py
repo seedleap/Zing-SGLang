@@ -3,11 +3,11 @@
 
 from dataclasses import dataclass, field
 
+from sglang.multimodal_gen.configs.sample.wan import Wan2_2_TI2V_5B_SamplingParam
 from sglang.multimodal_gen.configs.zing_resolution_buckets import (
     MINWM_RESOLUTION_BUCKETS,
     normalize_minwm_resolution_buckets,
 )
-from sglang.multimodal_gen.configs.sample.wan import Wan2_2_TI2V_5B_SamplingParam
 
 
 @dataclass

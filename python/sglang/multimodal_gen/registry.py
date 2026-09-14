@@ -168,7 +168,6 @@ from sglang.multimodal_gen.configs.sample.minimax_h3 import (
     FastH3SamplingParams,
     MiniMaxH3SamplingParams,
 )
-from sglang.multimodal_gen.configs.sample.zing import MinWMSamplingParams
 from sglang.multimodal_gen.configs.sample.mova import (
     MOVA_360P_SamplingParams,
     MOVA_720P_SamplingParams,
@@ -202,6 +201,7 @@ from sglang.multimodal_gen.configs.sample.zimage import (
     ZImageSamplingParams,
     ZImageTurboSamplingParams,
 )
+from sglang.multimodal_gen.configs.sample.zing import MinWMSamplingParams
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
     ComposedPipelineBase,
 )

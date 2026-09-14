@@ -14,10 +14,6 @@ from typing import Any
 
 import torch
 
-from sglang.multimodal_gen.configs.zing_resolution_buckets import (
-    MINWM_RESOLUTION_BUCKETS,
-    normalize_minwm_resolution_buckets,
-)
 from sglang.multimodal_gen.configs.pipeline_configs.zing import (
     MINWM_ACTION_LABELS_CONDITION,
     MINWM_ACTION_WEIGHTS_CONDITION,
@@ -27,6 +23,10 @@ from sglang.multimodal_gen.configs.pipeline_configs.zing import (
     MINWM_PROMPT_UPDATED_CONDITION,
     MINWM_TOTAL_CHUNKS_CONDITION,
     MINWM_TOTAL_LATENT_FRAMES_CONDITION,
+)
+from sglang.multimodal_gen.configs.zing_resolution_buckets import (
+    MINWM_RESOLUTION_BUCKETS,
+    normalize_minwm_resolution_buckets,
 )
 from sglang.multimodal_gen.runtime.distributed import (
     get_local_torch_device,
