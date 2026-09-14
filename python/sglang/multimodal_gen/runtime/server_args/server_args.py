@@ -421,7 +421,11 @@ class ServerArgs(DisaggServerArgsMixin):
 
     # Compilation
     enable_torch_compile: bool = False
+    enable_cuda_graph: bool = False
     regional_compile: bool = False
+
+    # Realtime session state kept by each diffusion worker.
+    realtime_max_sessions_per_worker: int = 1
 
     # Breakable CUDA graph (BCG): capture the DiT forward as CUDA-graph
     # segments split at attention modules (SP all-to-all / dynamic attention
@@ -616,6 +620,8 @@ class ServerArgs(DisaggServerArgsMixin):
 
     def _validate_parameters(self):
         """check consistency and raise errors for invalid configs"""
+        if self.realtime_max_sessions_per_worker < 1:
+            raise ValueError("realtime_max_sessions_per_worker must be >= 1")
         self._validate_scheduler_rpc_timeout()
         self._validate_pipeline()
         self._validate_offload()
@@ -2297,6 +2303,18 @@ class ServerArgs(DisaggServerArgsMixin):
             + "When no warmup mode is configured, this enables server warmup "
             + "so first real requests do not pay compile latency. "
             + "However, will likely cause precision drifts. See (https://github.com/pytorch/pytorch/issues/145213)",
+        )
+        parser.add_argument(
+            "--enable-cuda-graph",
+            action=StoreBoolean,
+            default=ServerArgs.enable_cuda_graph,
+            help="Capture the bounded Zing realtime DiT hot path with CUDA Graph.",
+        )
+        parser.add_argument(
+            "--realtime-max-sessions-per-worker",
+            type=int,
+            default=ServerArgs.realtime_max_sessions_per_worker,
+            help="Maximum persistent realtime sessions kept by each GPU worker.",
         )
         parser.add_argument(
             "--regional-compile",

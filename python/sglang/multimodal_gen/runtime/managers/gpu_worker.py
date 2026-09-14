@@ -1,6 +1,7 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 import gc
 import logging
 import multiprocessing as mp
@@ -237,7 +238,9 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
 
         self.cfg_group = get_cfg_group()
         self.cfg_cpu_group = self.cfg_group.cpu_group
-        self._realtime_sessions = RealtimeSessionCache(max_sessions=1)
+        self._realtime_sessions = RealtimeSessionCache(
+            max_sessions=server_args.realtime_max_sessions_per_worker
+        )
         self.memory_occupation: MemoryOccupationController | None = None
         # per-rank memory measurements of server warmup forwards; consumed by
         # the auto-residency placement decision before the server turns ready
@@ -273,7 +276,11 @@ class GPUWorker(GPUWorkerPostTrainingMixin):
 
         released = self._realtime_sessions.release(session_id)
         if released:
-            if torch.cuda.is_initialized():
+            has_persistent_pool = any(
+                bool(getattr(stage, "realtime_kv_cache_pool_enabled", False))
+                for stage in getattr(self.pipeline, "stages", ())
+            )
+            if torch.cuda.is_initialized() and not has_persistent_pool:
                 torch.cuda.empty_cache()
         return OutputBatch(output={"released": released, "session_id": session_id})
 

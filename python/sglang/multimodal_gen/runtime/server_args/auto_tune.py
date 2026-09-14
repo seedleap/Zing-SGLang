@@ -120,7 +120,8 @@ class ServerArgsAutoTuner:
         if args.performance_mode == "speed":
             logger.info("Applying performance_mode=speed")
             if (
-                self._deployment_config().speed_mode_enable_torch_compile_by_default
+                not args.enable_cuda_graph
+                and self._deployment_config().speed_mode_enable_torch_compile_by_default
                 and not args.enable_torch_compile
                 and not args.is_arg_explicitly_set("enable_torch_compile")
             ):

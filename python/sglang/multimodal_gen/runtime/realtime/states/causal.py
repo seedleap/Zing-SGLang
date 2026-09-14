@@ -15,6 +15,7 @@ class RealtimeCausalDiTState(BaseRealtimeState):
         super().__init__()
         self.kv_cache: Any = None
         self.crossattn_cache: Any = None
+        self.kv_cache_pool_lease: Any = None
         self.runtime_cache: dict = {}
         self.current_chunk_start_frame: int = 0
         self.chunk_idx: int = 0
@@ -23,6 +24,9 @@ class RealtimeCausalDiTState(BaseRealtimeState):
         self.scheduler: Any = None
 
     def dispose(self) -> None:
+        if self.kv_cache_pool_lease is not None:
+            self.kv_cache_pool_lease.release()
+            self.kv_cache_pool_lease = None
         self.kv_cache = None
         self.crossattn_cache = None
         self.runtime_cache.clear()

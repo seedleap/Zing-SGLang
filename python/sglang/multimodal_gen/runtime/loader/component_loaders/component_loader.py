@@ -383,7 +383,14 @@ class ComponentLoader(ABC):
                 f"Component attention backend for {component_attn_name!r} no longer "
                 f"matches the explicit request {requested_backend!r}"
             )
+        native_required_by_pipeline = component_name in getattr(
+            server_args.pipeline_config, "native_component_names", ()
+        )
         try:
+            if native_required_by_pipeline:
+                raise NativeComponentLoaderRequired(
+                    f"Pipeline requires the native {component_name} implementation"
+                )
             component = self._load_customized_with_context(
                 component_model_path,
                 server_args,
@@ -400,7 +407,9 @@ class ComponentLoader(ABC):
         ):
             raise
         except Exception as e:
-            if require_backend_selection or not allow_native_fallback:
+            if (
+                require_backend_selection or not allow_native_fallback
+            ) and not native_required_by_pipeline:
                 raise
             native_loader_required = isinstance(e, NativeComponentLoaderRequired)
             if native_loader_required and component_weight_override is not None:
@@ -410,9 +419,9 @@ class ComponentLoader(ABC):
                     f"--component-paths.{component_name} to replace its config "
                     "and weights together"
                 ) from e
-            if (
-                component_weight_override is not None
-                or self.should_raise_customized_load_error(server_args, component_name)
+            if component_weight_override is not None or (
+                not native_required_by_pipeline
+                and self.should_raise_customized_load_error(server_args, component_name)
             ):
                 if native_loader_required:
                     raise
@@ -450,7 +459,7 @@ class ComponentLoader(ABC):
                 component_attn_name,
                 require_backend_selection,
             )
-            source = "native"
+            source = "native-required" if native_required_by_pipeline else "native"
             logger.warning(
                 "Native component %s: %s is loaded, performance may be sub-optimal",
                 component_name,

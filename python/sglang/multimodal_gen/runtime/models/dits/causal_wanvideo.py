@@ -3,27 +3,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from functools import lru_cache
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.attention.flex_attention import (
     BlockMask,
     create_block_mask,
     flex_attention,
 )
-
-from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
-    LayerwiseOffloadableModuleMixin,
-)
-
-# wan 1.3B model has a weird channel / head configurations and require max-autotune to work with flexattention
-# see https://github.com/pytorch/pytorch/issues/133254
-# change to default for other models
-flex_attention = torch.compile(
-    flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs"
-)
-import torch.distributed as dist
 
 from sglang.multimodal_gen.configs.models.dits import WanVideoConfig
 from sglang.multimodal_gen.configs.models.fsdp import is_block
@@ -60,6 +50,9 @@ from sglang.multimodal_gen.runtime.layers.rotary_embedding import (
     get_rotary_pos_embed,
 )
 from sglang.multimodal_gen.runtime.layers.visual_embedding import PatchEmbed
+from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
+    LayerwiseOffloadableModuleMixin,
+)
 from sglang.multimodal_gen.runtime.models.dits.base import BaseDiT
 from sglang.multimodal_gen.runtime.models.dits.wanvideo import (
     WanT2VCrossAttention,
@@ -71,6 +64,13 @@ from sglang.multimodal_gen.runtime.platforms import (
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.srt.utils import add_prefix
+
+# wan 1.3B model has a weird channel / head configurations and require max-autotune to work with flexattention
+# see https://github.com/pytorch/pytorch/issues/133254
+# change to default for other models
+flex_attention = torch.compile(
+    flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs"
+)
 
 logger = init_logger(__name__)
 
@@ -101,6 +101,7 @@ class CausalWanSelfAttention(nn.Module):
         self.qk_norm = qk_norm
         self.eps = eps
         self.parallel_attention = parallel_attention
+        self.rotary_embedding_override = None
 
         # Scaled dot product attention
         self.attn = LocalAttention(
@@ -126,6 +127,7 @@ class CausalWanSelfAttention(nn.Module):
         kv_cache: CausalSelfAttentionKVCache | None = None,
         current_start: int = 0,
         cache_start: int | None = None,
+        qk_already_roped: bool = False,
     ):
         r"""
         Args:
@@ -134,9 +136,20 @@ class CausalWanSelfAttention(nn.Module):
             grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
-        cos, sin = freqs_cis
-        roped_query = _apply_rotary_emb(q, cos, sin, is_neox_style=False).type_as(v)
-        roped_key = _apply_rotary_emb(k, cos, sin, is_neox_style=False).type_as(v)
+        if qk_already_roped:
+            roped_query, roped_key = q.type_as(v), k.type_as(v)
+        else:
+            cos, sin = freqs_cis
+            if self.rotary_embedding_override is None:
+                roped_query = _apply_rotary_emb(
+                    q, cos, sin, is_neox_style=False
+                ).type_as(v)
+                roped_key = _apply_rotary_emb(k, cos, sin, is_neox_style=False).type_as(
+                    v
+                )
+            else:
+                roped_query = self.rotary_embedding_override(q, cos, sin).type_as(v)
+                roped_key = self.rotary_embedding_override(k, cos, sin).type_as(v)
 
         if kv_cache is None:
             # Padding for flex attention
@@ -204,6 +217,9 @@ class CausalWanSelfAttention(nn.Module):
 
 
 class CausalWanTransformerBlock(nn.Module):
+    self_attention_cls = CausalWanSelfAttention
+    cross_attention_cls = WanT2VCrossAttention
+
     def __init__(
         self,
         dim: int,
@@ -275,7 +291,7 @@ class CausalWanTransformerBlock(nn.Module):
             self.local_num_heads = num_heads
             head_start = 0
         dim_head = dim // num_heads
-        self.attn1 = CausalWanSelfAttention(
+        self.attn1 = self.self_attention_cls(
             dim,
             self.local_num_heads,
             local_attn_size=local_attn_size,
@@ -312,7 +328,7 @@ class CausalWanTransformerBlock(nn.Module):
         cross_attn_backends = {
             b for b in supported_attention_backends if not b.is_sparse
         }
-        self.attn2 = WanT2VCrossAttention(
+        self.attn2 = self.cross_attention_cls(
             dim,
             num_heads,
             qk_norm=qk_norm,
@@ -442,6 +458,8 @@ class CausalWanTransformerBlock(nn.Module):
 
 
 class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
+    transformer_block_cls = CausalWanTransformerBlock
+    patch_embedding_cls = PatchEmbed
     _fsdp_shard_conditions = [is_block]
     _compile_conditions = [is_block]
     param_names_mapping = WanVideoConfig().param_names_mapping
@@ -468,7 +486,7 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         self.local_attn_size = config.local_attn_size
 
         # 1. Patch & position embedding
-        self.patch_embedding = PatchEmbed(
+        self.patch_embedding = self.patch_embedding_cls(
             in_chans=config.in_channels,
             embed_dim=inner_dim,
             patch_size=config.patch_size,
@@ -486,7 +504,7 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         # 3. Transformer blocks
         self.blocks = nn.ModuleList(
             [
-                CausalWanTransformerBlock(
+                self.transformer_block_cls(
                     inner_dim,
                     config.ffn_dim,
                     config.num_attention_heads,
@@ -523,9 +541,8 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         # Causal-specific
         self.block_mask = None
         self.num_frame_per_block = self.config.num_frames_per_block
-        # Block size is bounded only by the causal block-mask construction, which
-        # supports any positive value.
-        assert self.num_frame_per_block >= 1
+        if self.num_frame_per_block <= 0:
+            raise ValueError("num_frames_per_block must be positive")
         self.independent_first_frame = False
 
         self.__post_init__()
@@ -607,6 +624,43 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
 
         return block_mask
 
+    @lru_cache(maxsize=4)
+    def _get_causal_rotary_pos_embed(
+        self,
+        post_patch_num_frames: int,
+        post_patch_height: int,
+        post_patch_width: int,
+        start_frame: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Reuse stable GPU RoPE storage across repeated denoising forwards.
+
+        Manual CUDA Graph capture records tensor addresses, so rebuilding these
+        tensors inside every forward is not only redundant but also makes the
+        captured SP=1 path depend on temporary allocations. Keep only a few
+        recent shapes/start positions to bound GPU memory during long streams.
+        """
+        d = self.hidden_size // self.num_attention_heads
+        rope_dim_list = [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)]
+        freqs_cos, freqs_sin = get_rotary_pos_embed(
+            (
+                post_patch_num_frames * get_sp_world_size(),
+                post_patch_height,
+                post_patch_width,
+            ),
+            self.hidden_size,
+            self.num_attention_heads,
+            rope_dim_list,
+            dtype=(
+                torch.float64
+                if current_platform.is_float64_supported()
+                else torch.float32
+            ),
+            rope_theta=10000,
+            start_frame=start_frame,
+        )
+        return freqs_cos.to(device), freqs_sin.to(device)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -618,6 +672,8 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         current_start: int = 0,
         cache_start: int = 0,
         start_frame: int = 0,
+        action: torch.Tensor | None = None,
+        action_token_residual: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""
         Run the diffusion model with kv caching.
@@ -644,33 +700,27 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         post_patch_width = width // p_w
 
         # Get rotary embeddings
-        d = self.hidden_size // self.num_attention_heads
-        rope_dim_list = [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)]
-        freqs_cos, freqs_sin = get_rotary_pos_embed(
-            (
-                post_patch_num_frames * get_sp_world_size(),
-                post_patch_height,
-                post_patch_width,
-            ),
-            self.hidden_size,
-            self.num_attention_heads,
-            rope_dim_list,
-            dtype=(
-                torch.float64
-                if current_platform.is_float64_supported()
-                else torch.float32
-            ),
-            rope_theta=10000,
-            start_frame=start_frame,  # Assume that start_frame is 0 when kv_cache is None
+        freqs_cos, freqs_sin = self._get_causal_rotary_pos_embed(
+            post_patch_num_frames,
+            post_patch_height,
+            post_patch_width,
+            start_frame,
+            hidden_states.device,
         )
-        freqs_cos = freqs_cos.to(hidden_states.device)
-        freqs_sin = freqs_sin.to(hidden_states.device)
         freqs_cis = (
             (freqs_cos.float(), freqs_sin.float()) if freqs_cos is not None else None
         )
 
         hidden_states = self.patch_embedding(hidden_states)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
+        hidden_states = self._apply_patch_token_condition(
+            hidden_states,
+            action=action,
+            action_token_residual=action_token_residual,
+            num_frames=post_patch_num_frames,
+            height=post_patch_height,
+            width=post_patch_width,
+        )
 
         (
             temb,
@@ -730,11 +780,9 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
                     **causal_kwargs,
                 )
 
-        # 5. Output norm, projection & unpatchify
-        temb = temb.unflatten(dim=0, sizes=timestep.shape).unsqueeze(2)
-        shift, scale = (self.scale_shift_table.unsqueeze(1) + temb).chunk(2, dim=2)
-        hidden_states = self.norm_out(hidden_states, shift, scale)
-        hidden_states = self.proj_out(hidden_states)
+        # 5. Output norm and projection. Model-specific implementations can
+        # preserve checkpoint-family rounding boundaries here.
+        hidden_states = self._apply_output_head(hidden_states, temb, timestep)
 
         hidden_states = hidden_states.reshape(
             batch_size,
@@ -750,6 +798,31 @@ class CausalWanTransformer3DModel(BaseDiT, LayerwiseOffloadableModuleMixin):
         output = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3)
 
         return output
+
+    def _apply_output_head(
+        self,
+        hidden_states: torch.Tensor,
+        temb: torch.Tensor,
+        timestep: torch.Tensor,
+    ) -> torch.Tensor:
+        temb = temb.unflatten(dim=0, sizes=timestep.shape).unsqueeze(2)
+        shift, scale = (self.scale_shift_table.unsqueeze(1) + temb).chunk(2, dim=2)
+        hidden_states = self.norm_out(hidden_states, shift, scale)
+        return self.proj_out(hidden_states)
+
+    def _apply_patch_token_condition(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        action: torch.Tensor | None,
+        action_token_residual: torch.Tensor | None = None,
+        num_frames: int,
+        height: int,
+        width: int,
+    ) -> torch.Tensor:
+        """Model-specific token condition hook after patch embedding."""
+        del action, action_token_residual, num_frames, height, width
+        return hidden_states
 
 
 EntryClass = CausalWanTransformer3DModel

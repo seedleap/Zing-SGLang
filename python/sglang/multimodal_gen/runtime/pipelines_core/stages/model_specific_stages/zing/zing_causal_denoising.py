@@ -1,0 +1,1975 @@
+# Copyright 2026 Seedleap.ai
+# Adapted from the Apache-2.0 minWM inference implementation.
+# SPDX-License-Identifier: Apache-2.0
+"""Realtime reference, action, and cache scheduling for Zing-0.5."""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import torch
+
+from sglang.multimodal_gen.configs.pipeline_configs.zing import (
+    MINWM_ACTION_LABELS_CONDITION,
+    MINWM_ACTION_WEIGHTS_CONDITION,
+    MINWM_CHUNK_SEED_CONDITION,
+    MINWM_CHUNK_SEED_PREFIX_FRAMES_CONDITION,
+    MINWM_CONDITION_SWITCH_CONDITION,
+    MINWM_PROMPT_UPDATED_CONDITION,
+    MINWM_TOTAL_CHUNKS_CONDITION,
+    MINWM_TOTAL_LATENT_FRAMES_CONDITION,
+)
+from sglang.multimodal_gen.configs.zing_resolution_buckets import (
+    MINWM_RESOLUTION_BUCKETS,
+    normalize_minwm_resolution_buckets,
+)
+from sglang.multimodal_gen.runtime.distributed import (
+    get_local_torch_device,
+    get_sp_parallel_rank,
+    get_sp_world_size,
+)
+from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+    get_ring_parallel_world_size,
+    get_ulysses_parallel_world_size,
+)
+from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
+from sglang.multimodal_gen.runtime.models.dits.zing import (
+    set_minwm_cuda_graph_active,
+)
+from sglang.multimodal_gen.runtime.models.dits.zing_action import (
+    validate_action_labels,
+    validate_action_weights,
+)
+from sglang.multimodal_gen.runtime.models.dits.zing_kv_cache import (
+    MinWMCausalAttentionKVPlan,
+    MinWMCausalSelfAttentionKVCache,
+)
+from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
+from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages.causal_denoising import (
+    CausalDMDCachePolicy,
+    CausalDMDDenoisingStage,
+    CausalDMDForwardContext,
+    CausalDMDRealtimeCacheContext,
+)
+from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
+    CausalVaeDecodingStage,
+)
+from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
+    StageValidators as V,
+)
+from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
+    VerificationResult,
+)
+from sglang.multimodal_gen.runtime.platforms import current_platform
+from sglang.multimodal_gen.runtime.realtime.causal_kv_cache_pool import (
+    RealtimeKVCachePool,
+    RealtimeKVCachePoolLease,
+    RealtimeKVCachePoolSlot,
+    allocated_cache_bytes,
+)
+from sglang.multimodal_gen.runtime.realtime.states import (
+    RealtimeCausalDiTState,
+    get_realtime_causal_dit_state,
+)
+from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.nvtx_pytorch_hooks import maybe_nvtx_range
+
+MINWM_ACTION_HISTORY_CACHE = "minwm_action_history"
+MINWM_INITIAL_NOISE_CACHE = "minwm_initial_noise"
+MINWM_INITIAL_NOISE_CURSOR_CACHE = "minwm_initial_noise_cursor"
+MINWM_T2V_FIRST_LATENT_CACHE = "minwm_t2v_first_latent"
+MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE = (
+    "minwm_action_residual_prepare_once_per_chunk"
+)
+logger = init_logger(__name__)
+
+
+def _static_cuda_graph_tensor(value: torch.Tensor) -> torch.Tensor:
+    static = torch.empty_strided(
+        value.shape,
+        value.stride(),
+        dtype=value.dtype,
+        device=value.device,
+    )
+    static.copy_(value)
+    return static
+
+
+def _cuda_graph_tensor_signature(value: torch.Tensor) -> tuple:
+    return (value.shape, value.stride(), value.dtype, value.device)
+
+
+_MINWM_CUDA_GRAPH_PLAN_INPUTS = (
+    "key_position_ids",
+    "query_position_ids",
+    "key_cos",
+    "key_sin",
+    "query_cos",
+    "query_sin",
+)
+
+
+def _cuda_graph_attention_plan_signature(
+    plan: MinWMCausalAttentionKVPlan,
+) -> tuple:
+    return tuple(
+        (
+            name,
+            (
+                None
+                if (value := getattr(plan, name)) is None
+                else _cuda_graph_tensor_signature(value)
+            ),
+        )
+        for name in _MINWM_CUDA_GRAPH_PLAN_INPUTS
+    )
+
+
+class _MinWMCudaGraphRunner:
+    """One full-DiT graph bound to a saturated MinWM session cache."""
+
+    def __init__(self, key: tuple) -> None:
+        self.key = key
+        self.graph = None
+        self.output = None
+        self.static_latent = None
+        self.static_prompt = None
+        self.static_timestep = None
+        self.static_action_token_residual = None
+        self.capture_stream = None
+        self.pool = None
+        self.capture_dependencies = None
+        self._last_attention_plan_source = None
+        self.replay_count = 0
+
+    def _copy_inputs(
+        self,
+        latent: torch.Tensor,
+        prompt: torch.Tensor,
+        timestep: torch.Tensor,
+        action_token_residual: torch.Tensor,
+    ) -> None:
+        self.static_latent.copy_(latent)
+        self.static_prompt.copy_(prompt)
+        self.static_timestep.copy_(timestep)
+        self.static_action_token_residual.copy_(action_token_residual)
+
+    def _copy_attention_plan_inputs(
+        self, attention_plan: MinWMCausalAttentionKVPlan
+    ) -> None:
+        if attention_plan is self._last_attention_plan_source:
+            return
+        static_plan = self.capture_dependencies
+        if static_plan is None:
+            raise RuntimeError("MinWM CUDA graph has no captured attention plan")
+        for name in _MINWM_CUDA_GRAPH_PLAN_INPUTS:
+            target = getattr(static_plan, name)
+            source = getattr(attention_plan, name)
+            if target is None or source is None:
+                if target is not source:
+                    raise RuntimeError(
+                        f"MinWM CUDA graph attention-plan input {name} changed"
+                    )
+                continue
+            if _cuda_graph_tensor_signature(target) != _cuda_graph_tensor_signature(
+                source
+            ):
+                raise RuntimeError(
+                    f"MinWM CUDA graph attention-plan input {name} changed shape"
+                )
+            if target.data_ptr() != source.data_ptr():
+                target.copy_(source)
+        self._last_attention_plan_source = attention_plan
+
+    def run(
+        self,
+        *,
+        latent: torch.Tensor,
+        prompt: torch.Tensor,
+        timestep: torch.Tensor,
+        action_token_residual: torch.Tensor,
+        attention_plan: MinWMCausalAttentionKVPlan,
+        capture_forward: (
+            Callable[
+                [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
+            ]
+            | None
+        ),
+    ) -> torch.Tensor:
+        if self.graph is not None:
+            self._copy_inputs(latent, prompt, timestep, action_token_residual)
+            # block_relative positions can still change when rope_max_frame_gap
+            # is greater than one. Refresh the
+            # captured plan's static tensors before replaying the fixed graph.
+            self._copy_attention_plan_inputs(attention_plan)
+            self.graph.replay()
+            self.replay_count += 1
+            if self.replay_count == 1 or self.replay_count % 100 == 0:
+                logger.info(
+                    "MinWM CUDA graph replay rank=%d count=%d",
+                    get_sp_parallel_rank(),
+                    self.replay_count,
+                )
+            return self.output
+
+        self.static_latent = _static_cuda_graph_tensor(latent)
+        self.static_prompt = _static_cuda_graph_tensor(prompt)
+        self.static_timestep = _static_cuda_graph_tensor(timestep)
+        self.static_action_token_residual = _static_cuda_graph_tensor(
+            action_token_residual
+        )
+        assert capture_forward is not None
+
+        self.capture_stream = torch.cuda.Stream(device=latent.device)
+        current_stream = torch.cuda.current_stream(latent.device)
+        self.capture_stream.wait_stream(current_stream)
+        with torch.cuda.stream(self.capture_stream):
+            for _ in range(2):
+                capture_forward(
+                    self.static_latent,
+                    self.static_prompt,
+                    self.static_timestep,
+                    self.static_action_token_residual,
+                )
+        current_stream.wait_stream(self.capture_stream)
+        torch.cuda.synchronize(latent.device)
+
+        self.graph = torch.cuda.CUDAGraph()
+        self.pool = torch.cuda.graph_pool_handle()
+        with torch.cuda.graph(self.graph, pool=self.pool, stream=self.capture_stream):
+            self.output = capture_forward(
+                self.static_latent,
+                self.static_prompt,
+                self.static_timestep,
+                self.static_action_token_residual,
+            )
+        current_stream.wait_stream(self.capture_stream)
+        # Do not consume the execution performed while stream capture is active.
+        # Materialize the first user-visible result through the same replay path
+        # as every subsequent denoising step.
+        self.graph.replay()
+        self._last_attention_plan_source = self.capture_dependencies
+        logger.info(
+            "Captured MinWM saturated recompute CUDA graph rank=%d",
+            get_sp_parallel_rank(),
+        )
+        return self.output
+
+
+def _parity_dump(name: str, value) -> None:
+    """Persist opt-in tensors used to localize baseline/API parity drift."""
+    dump_dir = os.environ.get("MINWM_PARITY_DUMP_DIR")
+    if not dump_dir:
+        return
+    path = (
+        Path(dump_dir)
+        / "sglang"
+        / f"sp_{get_sp_world_size():02d}_rank_{get_sp_parallel_rank():02d}"
+        / name
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def to_cpu(item):
+        return item.detach().cpu() if isinstance(item, torch.Tensor) else item
+
+    if isinstance(value, dict):
+        value = {key: to_cpu(item) for key, item in value.items()}
+    else:
+        value = to_cpu(value)
+    torch.save(value, path)
+
+
+class MinWMChunkLatentPreparationStage(PipelineStage):
+    """Draw BFCHW noise before permuting, matching minWM's RNG fill order."""
+
+    def __init__(self, transformer) -> None:
+        super().__init__()
+        self.transformer = transformer
+
+    @torch.no_grad()
+    def forward(self, batch: Req, server_args: ServerArgs) -> Req:
+        if batch.latents is not None:
+            return batch
+        condition = batch.image_latent
+        chunk_size = int(
+            batch.realtime_chunk_size or self.transformer.config.num_frames_per_block
+        )
+        generator = (
+            batch.generator[0] if isinstance(batch.generator, list) else batch.generator
+        )
+        if condition is not None:
+            batch_size = condition.shape[0]
+            latent_height, latent_width = condition.shape[3:]
+            latent_dtype = condition.dtype
+        else:
+            spatial_factor = int(
+                server_args.pipeline_config.vae_config.arch_config.scale_factor_spatial
+            )
+            if batch.height is None or batch.width is None:
+                raise ValueError("MinWM T2V requires height and width")
+            batch_size = int(batch.batch_size)
+            latent_height = int(batch.height) // spatial_factor
+            latent_width = int(batch.width) // spatial_factor
+            latent_dtype = batch.prompt_embeds[0].dtype
+        shape_tail = (
+            self.transformer.config.out_channels,
+            latent_height,
+            latent_width,
+        )
+        noise_bfchw = None
+        condition_inputs = batch.condition_inputs or {}
+        chunk_seed = condition_inputs.get(MINWM_CHUNK_SEED_CONDITION)
+        if chunk_seed is not None:
+            prefix_frames = int(
+                condition_inputs.get(MINWM_CHUNK_SEED_PREFIX_FRAMES_CONDITION, 0)
+            )
+            if prefix_frames < 0:
+                raise ValueError("MinWM chunk seed prefix frames must be non-negative")
+            chunk_generator = torch.Generator(device=get_local_torch_device())
+            chunk_generator.manual_seed(int(chunk_seed))
+            replay_noise_bfchw = torch.randn(
+                (batch_size, prefix_frames + chunk_size, *shape_tail),
+                generator=chunk_generator,
+                device=get_local_torch_device(),
+                dtype=latent_dtype,
+            )
+            noise_bfchw = replay_noise_bfchw[:, prefix_frames:]
+        if batch.session is not None:
+            state = get_realtime_causal_dit_state(batch.session)
+            total_chunks = condition_inputs.get(MINWM_TOTAL_CHUNKS_CONDITION)
+            total_latent_frames = condition_inputs.get(
+                MINWM_TOTAL_LATENT_FRAMES_CONDITION
+            )
+            if batch.block_idx == 0 and chunk_seed is None:
+                if total_chunks is not None and int(total_chunks) < 1:
+                    raise ValueError("MinWM total chunk count must be positive")
+                if total_latent_frames is not None:
+                    generated_frames = int(total_latent_frames)
+                elif condition is None:
+                    first_block = int(self.transformer.config.num_frame_first_block)
+                    regular_block = int(self.transformer.config.num_frames_per_block)
+                    generated_frames = first_block + regular_block * (
+                        int(total_chunks or 1) - 1
+                    )
+                else:
+                    generated_frames = chunk_size * int(total_chunks or 1)
+                # I2V consumes and overwrites one reference-noise slot. T2V
+                # generates its first block, so every sampled slot is retained.
+                reference_slots = int(condition is not None)
+                full_noise = torch.randn(
+                    (
+                        batch_size,
+                        reference_slots + generated_frames,
+                        *shape_tail,
+                    ),
+                    generator=generator,
+                    device=get_local_torch_device(),
+                    dtype=latent_dtype,
+                )
+                state.runtime_cache[MINWM_INITIAL_NOISE_CACHE] = full_noise[
+                    :, reference_slots:
+                ]
+                state.runtime_cache[MINWM_INITIAL_NOISE_CURSOR_CACHE] = 0
+                if condition is not None:
+                    _parity_dump("image_latent.pt", condition)
+                _parity_dump("initial_noise_bfchw.pt", full_noise)
+            cached_noise = state.runtime_cache.get(MINWM_INITIAL_NOISE_CACHE)
+            if noise_bfchw is None and cached_noise is not None:
+                start = int(
+                    state.runtime_cache.get(MINWM_INITIAL_NOISE_CURSOR_CACHE, 0)
+                )
+                end = start + chunk_size
+                if end <= cached_noise.shape[1]:
+                    noise_bfchw = cached_noise[:, start:end]
+                    state.runtime_cache[MINWM_INITIAL_NOISE_CURSOR_CACHE] = end
+                elif total_chunks is not None or total_latent_frames is not None:
+                    raise ValueError(
+                        "MinWM realtime request exceeded its pre-sampled noise horizon"
+                    )
+        if noise_bfchw is None:
+            noise_bfchw = torch.randn(
+                (batch_size, chunk_size, *shape_tail),
+                generator=generator,
+                device=get_local_torch_device(),
+                dtype=latent_dtype,
+            )
+        batch.latents = noise_bfchw.permute(0, 2, 1, 3, 4).contiguous()
+        batch.raw_latent_shape = batch.latents.shape
+        return batch
+
+    def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
+        result = VerificationResult()
+        result.add_check(
+            "image_latent", batch.image_latent, V.none_or_tensor_with_dims(5)
+        )
+        result.add_check("generator", batch.generator, V.generator_or_list_generators)
+        result.add_check("latents", batch.latents, V.none_or_tensor)
+        return result
+
+
+class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
+    """One clean reference commit followed by four-frame action DMD chunks."""
+
+    def __init__(self, transformer, scheduler) -> None:
+        super().__init__(transformer, scheduler)
+        self._minwm_cuda_graph_enabled = False
+        self._minwm_cuda_graph_runner: _MinWMCudaGraphRunner | None = None
+        self._realtime_kv_cache_pool: RealtimeKVCachePool | None = None
+        self._realtime_kv_cache_pool_policies: dict[str, CausalDMDCachePolicy] = {}
+        self._realtime_kv_cache_pool_shapes: dict[str, tuple[int, int, int]] = {}
+        self._realtime_kv_cache_pool_bucket_by_shape: dict[
+            tuple[int, int, int], str
+        ] = {}
+        self._realtime_kv_cache_pool_dtype: torch.dtype | None = None
+
+    @property
+    def realtime_kv_cache_pool_enabled(self) -> bool:
+        return self._realtime_kv_cache_pool is not None
+
+    def _resolve_realtime_kv_cache_pool_config(
+        self, server_args: ServerArgs
+    ) -> tuple[int, tuple[str, ...]] | None:
+        """Validate the optional launch contract and return pool size and buckets."""
+        pipeline_config = server_args.pipeline_config
+        configured_pool_size = getattr(
+            pipeline_config, "realtime_causal_kv_cache_pool_size", None
+        )
+        configured_buckets = getattr(
+            pipeline_config, "realtime_causal_kv_cache_pool_buckets", None
+        )
+        if configured_pool_size is None:
+            if configured_buckets is not None:
+                raise ValueError(
+                    "realtime_causal_kv_cache_pool_buckets requires "
+                    "realtime_causal_kv_cache_pool_size"
+                )
+            return
+        if configured_buckets is None:
+            raise ValueError(
+                "MinWM realtime KV cache pool requires symbolic resolution "
+                "buckets selected by the launch profile"
+            )
+        bucket_names = normalize_minwm_resolution_buckets(str(configured_buckets))
+        pool_size = int(configured_pool_size)
+        if pool_size <= 0:
+            raise ValueError(
+                "realtime_causal_kv_cache_pool_size must be positive when set"
+            )
+        admitted_sessions = int(server_args.realtime_max_sessions_per_worker)
+        if pool_size < admitted_sessions:
+            raise ValueError(
+                "MinWM realtime KV cache pool must cover every admitted worker "
+                f"session: pool_size={pool_size} "
+                f"realtime_max_sessions_per_worker={admitted_sessions}"
+            )
+        return pool_size, bucket_names
+
+    def _configure_startup_pool_cache_contract(self, server_args: ServerArgs) -> None:
+        """Apply the bounded window/sink contract shared by every startup bucket."""
+        pipeline_config = server_args.pipeline_config
+        configured_window = getattr(
+            pipeline_config, "realtime_causal_kv_cache_num_frames", None
+        )
+        if configured_window is None and int(self.local_attn_size) == -1:
+            raise ValueError(
+                "MinWM realtime KV cache pool requires a bounded cache window. "
+                "Set realtime_causal_kv_cache_num_frames."
+            )
+
+        self._reset_causal_cache_config_defaults()
+        if configured_window is not None:
+            if int(configured_window) <= 0:
+                raise ValueError("realtime_causal_kv_cache_num_frames must be positive")
+            self.sliding_window_num_frames = int(configured_window)
+        configured_sink = getattr(pipeline_config, "realtime_causal_sink_size", None)
+        if configured_sink is not None:
+            if int(configured_sink) < 0:
+                raise ValueError("realtime_causal_sink_size must be non-negative")
+            self.sink_size = int(configured_sink)
+
+        self._minwm_unbounded_cache = False
+        self._minwm_cuda_graph_enabled = bool(
+            getattr(server_args, "enable_cuda_graph", False)
+        )
+
+    def _build_startup_pool_bucket_policies(
+        self,
+        server_args: ServerArgs,
+        bucket_names: tuple[str, ...],
+        *,
+        sequence_shard_enabled: bool,
+    ) -> tuple[
+        dict[str, CausalDMDCachePolicy],
+        dict[str, tuple[int, int, int]],
+        list[dict[str, Any]],
+    ]:
+        """Build and validate the logical cache policy for each exact resolution."""
+        pipeline_config = server_args.pipeline_config
+        spatial_factor = int(
+            pipeline_config.vae_config.arch_config.scale_factor_spatial
+        )
+        patch_height = int(self.transformer.config.patch_size[-2])
+        patch_width = int(self.transformer.config.patch_size[-1])
+        bucket_policies: dict[str, CausalDMDCachePolicy] = {}
+        bucket_shapes: dict[str, tuple[int, int, int]] = {}
+        bucket_log_details: list[dict[str, Any]] = []
+        for bucket_name in bucket_names:
+            output_width, output_height = MINWM_RESOLUTION_BUCKETS[bucket_name]
+            if output_height % spatial_factor or output_width % spatial_factor:
+                raise ValueError(
+                    "MinWM realtime KV cache pool resolution must be divisible by "
+                    f"VAE spatial factor {spatial_factor}: bucket={bucket_name} "
+                    f"height={output_height} width={output_width}"
+                )
+            latent_height = output_height // spatial_factor
+            latent_width = output_width // spatial_factor
+            if latent_height % patch_height or latent_width % patch_width:
+                raise ValueError(
+                    "MinWM realtime KV cache pool latent resolution must be "
+                    f"divisible by DiT patch size {patch_height}x{patch_width}: "
+                    f"bucket={bucket_name} latent_height={latent_height} "
+                    f"latent_width={latent_width}"
+                )
+
+            self._prepare_frame_seq_length(latent_height, latent_width)
+            policy = CausalDMDCachePolicy(
+                sequence_shard_enabled=sequence_shard_enabled,
+                num_attention_heads=self._num_causal_cache_attention_heads(
+                    sequence_shard_enabled=sequence_shard_enabled
+                ),
+                expected_cache_tokens=self._get_causal_kv_cache_size(
+                    sequence_shard_enabled=sequence_shard_enabled
+                ),
+                expected_sink_tokens=self._get_causal_sink_tokens(),
+                kv_cache_kwargs={},
+            )
+            policy.kv_cache_kwargs = self._causal_kv_cache_kwargs(policy)
+            shape = (1, latent_height, latent_width)
+            bucket_policies[bucket_name] = policy
+            bucket_shapes[bucket_name] = shape
+            bucket_log_details.append(
+                {
+                    "cache_tokens": policy.expected_cache_tokens,
+                    "latent_height": latent_height,
+                    "latent_width": latent_width,
+                    "name": bucket_name,
+                    "output_height": output_height,
+                    "output_width": output_width,
+                    "sink_tokens": policy.expected_sink_tokens,
+                }
+            )
+        return bucket_policies, bucket_shapes, bucket_log_details
+
+    def _allocate_startup_pool_slots(
+        self,
+        server_args: ServerArgs,
+        *,
+        pool_size: int,
+        max_policy: CausalDMDCachePolicy,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[list[RealtimeKVCachePoolSlot], int]:
+        """Allocate all physical slot tensors using the largest bucket policy."""
+        slots: list[RealtimeKVCachePoolSlot] = []
+        rotated_k_buffers = 0
+        for slot_id in range(pool_size):
+            kv_cache, crossattn_cache = self._initialize_causal_caches(
+                batch_size=1,
+                max_text_len=self._get_max_text_len(server_args),
+                dtype=dtype,
+                device=device,
+                kv_cache_kwargs=max_policy.kv_cache_kwargs,
+            )
+            for layer, cache_block in enumerate(kv_cache):
+                if not isinstance(cache_block, MinWMCausalSelfAttentionKVCache):
+                    raise TypeError(
+                        "MinWM startup KV cache pool created an unexpected cache "
+                        f"type at slot {slot_id}, layer {layer}: "
+                        f"{type(cache_block).__name__}"
+                    )
+                cache_block.rotated_k = torch.empty_like(cache_block.k)
+                rotated_k_buffers += 1
+            slots.append(
+                RealtimeKVCachePoolSlot(
+                    slot_id=slot_id,
+                    kv_cache=kv_cache,
+                    crossattn_cache=crossattn_cache,
+                )
+            )
+            self._clear_stage_causal_cache_refs()
+        return slots, rotated_k_buffers
+
+    def _log_startup_pool_ready(
+        self,
+        *,
+        initialization_started_at: float,
+        pool_size: int,
+        slots: list[RealtimeKVCachePoolSlot],
+        bucket_log_details: list[dict[str, Any]],
+        max_bucket_name: str,
+        max_policy: CausalDMDCachePolicy,
+        rotated_k_buffers: int,
+        sequence_shard_enabled: bool,
+    ) -> None:
+        """Emit the per-rank readiness record after every allocation is complete."""
+        max_output_width, max_output_height = MINWM_RESOLUTION_BUCKETS[max_bucket_name]
+        logger.info(
+            "MINWM_KV_CACHE_POOL_READY_JSON %s",
+            json.dumps(
+                {
+                    "allocated_bytes": allocated_cache_bytes(slots),
+                    "buckets": bucket_log_details,
+                    "cache_tokens": max_policy.expected_cache_tokens,
+                    "initialization_ms": round(
+                        (time.perf_counter() - initialization_started_at) * 1000,
+                        3,
+                    ),
+                    "max_bucket": max_bucket_name,
+                    "num_attention_heads_per_rank": max_policy.num_attention_heads,
+                    "output_height": max_output_height,
+                    "output_width": max_output_width,
+                    "rank": get_sp_parallel_rank(),
+                    "rotated_k_buffers": rotated_k_buffers,
+                    "rotated_k_preallocated": rotated_k_buffers
+                    == pool_size * self.num_transformer_blocks,
+                    "sequence_shard_enabled": sequence_shard_enabled,
+                    "sink_frames": self.sink_size,
+                    "slots": pool_size,
+                    "window_frames": self.sliding_window_num_frames,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+
+    def initialize_realtime_kv_cache_pool(self, server_args: ServerArgs) -> None:
+        """Allocate every bounded realtime self-attention KV slot before readiness."""
+        pool_config = self._resolve_realtime_kv_cache_pool_config(server_args)
+        if pool_config is None:
+            return
+
+        initialization_started_at = time.perf_counter()
+        pool_size, bucket_names = pool_config
+        self._configure_startup_pool_cache_contract(server_args)
+        sequence_shard_enabled = get_ulysses_parallel_world_size() > 1
+        bucket_policies, bucket_shapes, bucket_log_details = (
+            self._build_startup_pool_bucket_policies(
+                server_args,
+                bucket_names,
+                sequence_shard_enabled=sequence_shard_enabled,
+            )
+        )
+        max_bucket_name = max(
+            bucket_names,
+            key=lambda name: bucket_policies[name].expected_cache_tokens,
+        )
+        max_policy = bucket_policies[max_bucket_name]
+        _, max_latent_height, max_latent_width = bucket_shapes[max_bucket_name]
+        self._prepare_frame_seq_length(max_latent_height, max_latent_width)
+
+        device = torch.device(get_local_torch_device())
+        dtype = self._target_dtype()
+        slots, rotated_k_buffers = self._allocate_startup_pool_slots(
+            server_args,
+            pool_size=pool_size,
+            max_policy=max_policy,
+            device=device,
+            dtype=dtype,
+        )
+
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        self._realtime_kv_cache_pool = RealtimeKVCachePool(slots)
+        self._realtime_kv_cache_pool_policies = bucket_policies
+        self._realtime_kv_cache_pool_shapes = bucket_shapes
+        self._realtime_kv_cache_pool_bucket_by_shape = {
+            shape: bucket_name for bucket_name, shape in bucket_shapes.items()
+        }
+        self._realtime_kv_cache_pool_dtype = dtype
+        self._log_startup_pool_ready(
+            initialization_started_at=initialization_started_at,
+            pool_size=pool_size,
+            slots=slots,
+            bucket_log_details=bucket_log_details,
+            max_bucket_name=max_bucket_name,
+            max_policy=max_policy,
+            rotated_k_buffers=rotated_k_buffers,
+            sequence_shard_enabled=sequence_shard_enabled,
+        )
+
+    def _causal_sequence_shard_enabled(self, batch: Req) -> bool:
+        return bool(
+            getattr(batch, "enable_sequence_shard", False)
+            and get_ulysses_parallel_world_size() > 1
+        )
+
+    def _num_causal_cache_attention_heads(
+        self,
+        *,
+        sequence_shard_enabled: bool,
+    ) -> int:
+        num_attention_heads = self.transformer.num_attention_heads
+        if not sequence_shard_enabled:
+            return num_attention_heads
+
+        ulysses_world_size = get_ulysses_parallel_world_size()
+        if get_ring_parallel_world_size() > 1:
+            raise NotImplementedError(
+                "MinWM causal sequence sharding supports Ulysses with "
+                "ring_degree = 1 only."
+            )
+        if ulysses_world_size <= 1:
+            raise ValueError(
+                "MinWM causal sequence sharding requires ulysses_degree > 1."
+            )
+        if num_attention_heads % ulysses_world_size != 0:
+            raise ValueError(
+                f"num_attention_heads ({num_attention_heads}) must be divisible "
+                f"by ulysses_degree ({ulysses_world_size})."
+            )
+        return num_attention_heads // ulysses_world_size
+
+    def _apply_causal_cache_overrides(
+        self,
+        batch: Req,
+        server_args: ServerArgs,
+    ) -> None:
+        self._reset_causal_cache_config_defaults()
+        explicit_window = getattr(batch, "realtime_causal_kv_cache_num_frames", None)
+        if explicit_window is None:
+            explicit_window = getattr(
+                server_args.pipeline_config,
+                "realtime_causal_kv_cache_num_frames",
+                None,
+            )
+        super()._apply_causal_cache_overrides(batch, server_args)
+        arch_config = self.transformer.config
+        self._minwm_unbounded_cache = (
+            explicit_window is None and int(arch_config.local_attn_size) == -1
+        )
+        if not self._minwm_unbounded_cache:
+            return
+        total_chunks = (batch.condition_inputs or {}).get(MINWM_TOTAL_CHUNKS_CONDITION)
+        total_latent_frames = (batch.condition_inputs or {}).get(
+            MINWM_TOTAL_LATENT_FRAMES_CONDITION
+        )
+        if total_latent_frames is not None:
+            self.sliding_window_num_frames = int(total_latent_frames) + int(
+                batch.image_latent is not None
+            )
+        elif total_chunks is not None:
+            # minWM main uses local_attn_size=-1: retain the reference and every
+            # generated latent. A bounded realtime request can allocate that
+            # complete horizon once instead of treating 128 as a sliding window.
+            if batch.image_latent is not None:
+                self.sliding_window_num_frames = 1 + int(total_chunks) * int(
+                    self.num_frames_per_block
+                )
+            else:
+                first_block = int(self.transformer.config.num_frame_first_block)
+                self.sliding_window_num_frames = first_block + (
+                    int(total_chunks) - 1
+                ) * int(self.num_frames_per_block)
+
+    def _reset_causal_cache_config_defaults(self) -> None:
+        """Prevent request-local sink/window overrides from leaking to the next session."""
+        arch_config = getattr(self.transformer, "config", None)
+        if arch_config is None:
+            return
+        if hasattr(arch_config, "sink_size"):
+            self.sink_size = int(arch_config.sink_size)
+        if hasattr(arch_config, "sliding_window_num_frames"):
+            self.sliding_window_num_frames = int(arch_config.sliding_window_num_frames)
+
+    def _causal_kv_cache_kwargs(self, policy: CausalDMDCachePolicy) -> dict:
+        arch_config = getattr(self.transformer, "config", None)
+        cache_kwargs = {
+            "sequence_shard_enabled": policy.sequence_shard_enabled,
+            "kv_cache_size": policy.expected_cache_tokens,
+            "allow_growth": bool(getattr(self, "_minwm_unbounded_cache", True)),
+            "rope_position_mode": str(
+                getattr(arch_config, "rope_position_mode", "absolute")
+            ),
+            "rope_max_frame_gap": int(getattr(arch_config, "rope_max_frame_gap", 1)),
+            "prompt_first_frame_pin_enabled": bool(
+                getattr(arch_config, "prompt_first_frame_pin_enabled", False)
+            ),
+            "scene_cut_rope_offset": int(
+                getattr(arch_config, "scene_cut_rope_offset", 0)
+            ),
+            "scene_cut_sink_enabled": bool(
+                getattr(arch_config, "scene_cut_sink_enabled", False)
+            ),
+        }
+        if getattr(self, "_minwm_cuda_graph_enabled", False):
+            if cache_kwargs["allow_growth"]:
+                raise ValueError(
+                    "MinWM CUDA graph requires a bounded realtime KV window. "
+                    "Set realtime_causal_kv_cache_num_frames on the request or model."
+                )
+            if cache_kwargs["rope_position_mode"] != "block_relative":
+                raise ValueError(
+                    "MinWM CUDA graph currently requires block_relative RoPE so "
+                    "one saturated graph remains valid across chunks."
+                )
+        return cache_kwargs
+
+    def _initialize_kv_cache(
+        self,
+        batch_size,
+        dtype,
+        device,
+        *,
+        sequence_shard_enabled: bool = False,
+        kv_cache_size: int | None = None,
+        allow_growth: bool = False,
+        rope_position_mode: str = "absolute",
+        rope_max_frame_gap: int = 1,
+        prompt_first_frame_pin_enabled: bool = False,
+        scene_cut_rope_offset: int = 0,
+        scene_cut_sink_enabled: bool = False,
+    ) -> None:
+        num_attention_heads = self._num_causal_cache_attention_heads(
+            sequence_shard_enabled=sequence_shard_enabled
+        )
+        attention_head_dim = self.transformer.attention_head_dim
+        if kv_cache_size is None:
+            kv_cache_size = self._get_causal_kv_cache_size(
+                sequence_shard_enabled=sequence_shard_enabled
+            )
+        use_int_indices = self._use_causal_cache_int_indices(
+            sequence_shard_enabled=sequence_shard_enabled
+        )
+        int_index = 0 if use_int_indices else None
+        sink_tokens = self._get_causal_sink_tokens()
+        attention_window_size = self._get_causal_attention_window_size(kv_cache_size)
+        self.causal_kv_cache = [
+            MinWMCausalSelfAttentionKVCache(
+                k=torch.zeros(
+                    (
+                        batch_size,
+                        kv_cache_size,
+                        num_attention_heads,
+                        attention_head_dim,
+                    ),
+                    dtype=dtype,
+                    device=device,
+                ),
+                v=torch.zeros(
+                    (
+                        batch_size,
+                        kv_cache_size,
+                        num_attention_heads,
+                        attention_head_dim,
+                    ),
+                    dtype=dtype,
+                    device=device,
+                ),
+                global_end_index=torch.zeros(1, dtype=torch.long, device=device),
+                local_end_index=torch.zeros(1, dtype=torch.long, device=device),
+                global_end_index_int=int_index,
+                local_end_index_int=int_index,
+                cache_size=kv_cache_size,
+                sink_tokens=sink_tokens,
+                attention_window_size=attention_window_size,
+                allow_growth=allow_growth,
+                rope_position_mode=rope_position_mode,
+                rope_max_frame_gap=rope_max_frame_gap,
+                prompt_first_frame_pin_enabled=prompt_first_frame_pin_enabled,
+                scene_cut_rope_offset=scene_cut_rope_offset,
+                scene_cut_sink_enabled=scene_cut_sink_enabled,
+            )
+            for _ in range(self.num_transformer_blocks)
+        ]
+
+    def _use_causal_cache_int_indices(
+        self,
+        *,
+        sequence_shard_enabled: bool,
+    ) -> bool:
+        del sequence_shard_enabled
+        # MinWM cache selection runs eagerly even on the single-GPU path. Keep
+        # host cursors authoritative so reading 30 layer cursors never forces a
+        # device-to-host synchronization.
+        return True
+
+    def _should_reset_realtime_causal_caches(
+        self,
+        batch: Req,
+        *,
+        cache_state,
+        policy,
+    ) -> bool:
+        if not policy.kv_cache_kwargs.get("allow_growth", False):
+            return super()._should_reset_realtime_causal_caches(
+                batch, cache_state=cache_state, policy=policy
+            )
+        causal_kv_cache = cache_state.kv_cache
+        crossattn_cache = cache_state.crossattn_cache
+        first_cache = (
+            causal_kv_cache[0]
+            if causal_kv_cache and len(causal_kv_cache) == self.num_transformer_blocks
+            else None
+        )
+        expected = policy.kv_cache_kwargs
+        return (
+            batch.block_idx == 0
+            or causal_kv_cache is None
+            or crossattn_cache is None
+            or len(causal_kv_cache) != self.num_transformer_blocks
+            or len(crossattn_cache) != self.num_transformer_blocks
+            or not isinstance(first_cache, MinWMCausalSelfAttentionKVCache)
+            or first_cache.k.shape[1] < policy.expected_cache_tokens
+            or first_cache.k.shape[2] != policy.num_attention_heads
+            or first_cache.sink_tokens != policy.expected_sink_tokens
+            or first_cache.rope_position_mode
+            != expected.get("rope_position_mode", "absolute")
+            or first_cache.rope_max_frame_gap != expected.get("rope_max_frame_gap", 1)
+            or first_cache.prompt_first_frame_pin_enabled
+            != expected.get("prompt_first_frame_pin_enabled", False)
+            or first_cache.scene_cut_rope_offset
+            != expected.get("scene_cut_rope_offset", 0)
+            or first_cache.scene_cut_sink_enabled
+            != expected.get("scene_cut_sink_enabled", False)
+        )
+
+    def _flow_prediction_to_x0(
+        self,
+        *,
+        flow_prediction: torch.Tensor,
+        noisy_latent: torch.Tensor,
+        timestep: torch.Tensor,
+        scheduler,
+    ) -> torch.Tensor:
+        # minWM's FewStepRenoiseScheduler calls pred_x0_from_flow with its
+        # default compute_dtype=torch.float32. Preserve that arithmetic instead
+        # of the generic causal path's fp64 stabilization.
+        original_dtype = noisy_latent.dtype
+        timestep = timestep.reshape(-1).to(scheduler.timesteps.device)
+        if timestep.numel() == 1:
+            timestep = timestep.expand(noisy_latent.shape[0])
+        elif timestep.numel() != noisy_latent.shape[0]:
+            timestep = timestep.repeat_interleave(
+                noisy_latent.shape[0] // timestep.numel()
+            )
+        timestep_id = torch.argmin(
+            (
+                scheduler.timesteps.float().unsqueeze(0) - timestep.float().unsqueeze(1)
+            ).abs(),
+            dim=1,
+        )
+        sigma = (
+            scheduler.sigmas.to(noisy_latent.device)
+            .float()[timestep_id]
+            .reshape(-1, 1, 1, 1)
+        )
+        return (noisy_latent.float() - sigma * flow_prediction.float()).to(
+            original_dtype
+        )
+
+    def _get_causal_dmd_scheduler(self, batch: Req, server_args: ServerArgs):
+        if batch.scheduler is None:
+            raise ValueError("MinWM requires DMDTimestepPreparationStage")
+        return batch.scheduler
+
+    def _prepare_causal_dmd_timesteps(
+        self,
+        batch: Req,
+        server_args: ServerArgs,
+        scheduler,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if batch.timesteps is None:
+            raise ValueError("MinWM requires prepared DMD timesteps")
+        return batch.timesteps.to(device)
+
+    @staticmethod
+    def _prompt_seq_len(batch: Req, prompt: torch.Tensor) -> int:
+        seq_lens = getattr(batch, "prompt_seq_lens", None)
+        if seq_lens and seq_lens[0]:
+            return int(seq_lens[0][0])
+        masks = getattr(batch, "prompt_embeds_mask", None)
+        if masks and masks[0] is not None:
+            return int(masks[0][0].sum().item())
+        masks = getattr(batch, "prompt_attention_mask", None)
+        if masks and masks[0] is not None:
+            return int(masks[0][0].sum().item())
+        return int(prompt.shape[1])
+
+    def _prepare_causal_dmd_prompt_embeds(
+        self,
+        batch: Req,
+        server_args: ServerArgs,
+        target_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if len(batch.prompt_embeds) != 1:
+            raise ValueError("MinWM realtime inference supports one text encoder")
+        prompt = batch.prompt_embeds[0]
+        if prompt.shape[0] != 1:
+            raise ValueError("MinWM realtime inference currently requires batch size 1")
+        seq_len = self._prompt_seq_len(batch, prompt)
+        return prompt[:, :seq_len].to(dtype=target_dtype)
+
+    def _action_cache_state(self, batch: Req):
+        if batch.session is None:
+            raise ValueError("MinWM realtime inference requires a session")
+        return get_realtime_causal_dit_state(batch.session)
+
+    def _prepare_causal_dmd_pos_cond_kwargs(
+        self,
+        batch: Req,
+        server_args: ServerArgs,
+        target_dtype: torch.dtype,
+    ) -> dict:
+        del target_dtype
+        state = self._action_cache_state(batch)
+        condition_inputs = batch.condition_inputs or {}
+        weight_windows = condition_inputs.get(MINWM_ACTION_WEIGHTS_CONDITION)
+        if batch.block_idx == 0:
+            # Native V3 starts T2V with a cold action cache: the first action
+            # convolution sees only the current first block. I2V has one
+            # committed reference frame, represented by one noop history slot.
+            initial_history_frames = int(
+                getattr(batch, "image_latent", None) is not None
+            )
+            if weight_windows is None:
+                history = torch.zeros(
+                    (1, initial_history_frames),
+                    dtype=torch.long,
+                    device=batch.latents.device,
+                )
+            else:
+                temporal_factor = int(
+                    server_args.pipeline_config.vae_config.arch_config.scale_factor_temporal
+                )
+                history = torch.zeros(
+                    (1, initial_history_frames, temporal_factor, 8),
+                    dtype=torch.float32,
+                    device=batch.latents.device,
+                )
+            state.runtime_cache[MINWM_ACTION_HISTORY_CACHE] = history
+        history = state.runtime_cache.get(MINWM_ACTION_HISTORY_CACHE)
+        if history is None:
+            raise ValueError("MinWM action history is missing for a continued session")
+        history_frames = int(self.transformer.config.action_history_frames)
+
+        if weight_windows is not None:
+            expected_frames = int(batch.latents.shape[2])
+            temporal_factor = int(
+                server_args.pipeline_config.vae_config.arch_config.scale_factor_temporal
+            )
+            if (
+                not isinstance(weight_windows, list)
+                or len(weight_windows) != expected_frames
+            ):
+                raise ValueError(
+                    f"expected {expected_frames} MinWM latent action windows"
+                )
+            flat_rows = []
+            for window in weight_windows:
+                if not isinstance(window, list) or len(window) != temporal_factor:
+                    raise ValueError(
+                        f"each MinWM action window must contain {temporal_factor} rows"
+                    )
+                flat_rows.extend(window)
+            flat_rows = validate_action_weights(
+                flat_rows, expected_frames=expected_frames * temporal_factor
+            )
+            current = torch.tensor(
+                flat_rows, dtype=torch.float32, device=batch.latents.device
+            ).reshape(1, expected_frames, temporal_factor, 8)
+            if history.ndim != 4:
+                raise ValueError("MinWM action form cannot change within a session")
+            action_window = torch.cat([history[:, -history_frames:], current], dim=1)
+            return {"action": action_window}
+
+        labels = condition_inputs.get(MINWM_ACTION_LABELS_CONDITION)
+        if labels is None:
+            labels = [0] * int(batch.latents.shape[2])
+        labels = validate_action_labels(
+            labels, expected_frames=int(batch.latents.shape[2])
+        )
+        current = torch.tensor(
+            labels, dtype=torch.long, device=batch.latents.device
+        ).unsqueeze(0)
+        if history.ndim != 2:
+            raise ValueError("MinWM action form cannot change within a session")
+        action_window = torch.cat([history[:, -history_frames:], current], dim=1)
+        return {"action": action_window}
+
+    def _log_runtime_alignment_once(
+        self,
+        batch: Req,
+        cache_ctx: CausalDMDRealtimeCacheContext,
+    ) -> None:
+        if getattr(self, "_runtime_alignment_logged", False):
+            return
+
+        arch_config = self.transformer.config
+        caches = cache_ctx.kv_cache
+        sequence_shard_enabled = self._causal_sequence_shard_enabled(batch)
+        expected_cache_tokens = self._get_causal_kv_cache_size(
+            sequence_shard_enabled=sequence_shard_enabled
+        )
+        expected_sink_tokens = self._get_causal_sink_tokens()
+        expected_attention_window_tokens = self._get_causal_attention_window_size(
+            expected_cache_tokens
+        )
+        expected_attention_heads = self._num_causal_cache_attention_heads(
+            sequence_shard_enabled=sequence_shard_enabled
+        )
+        expected = {
+            "layer_count": int(self.num_transformer_blocks),
+            "cache_tokens": int(expected_cache_tokens),
+            "sink_tokens": int(expected_sink_tokens),
+            "attention_window_tokens": int(expected_attention_window_tokens),
+            "attention_heads": int(expected_attention_heads),
+            "allow_growth": bool(self._minwm_unbounded_cache),
+            "rope_position_mode": str(
+                getattr(arch_config, "rope_position_mode", "absolute")
+            ),
+            "rope_max_frame_gap": int(getattr(arch_config, "rope_max_frame_gap", 1)),
+            "prompt_first_frame_pin_enabled": bool(
+                getattr(arch_config, "prompt_first_frame_pin_enabled", False)
+            ),
+            "scene_cut_rope_offset": int(
+                getattr(arch_config, "scene_cut_rope_offset", 0)
+            ),
+            "scene_cut_sink_enabled": bool(
+                getattr(arch_config, "scene_cut_sink_enabled", False)
+            ),
+        }
+        violations: list[dict[str, Any]] = []
+
+        def check(layer: int | None, field: str, actual: Any) -> None:
+            expected_value = expected[field]
+            if actual != expected_value:
+                violations.append(
+                    {
+                        "layer": layer,
+                        "field": field,
+                        "expected": expected_value,
+                        "actual": actual,
+                    }
+                )
+
+        check(None, "layer_count", len(caches))
+        for layer, cache in enumerate(caches):
+            check(layer, "cache_tokens", int(cache.cache_size))
+            check(layer, "sink_tokens", int(cache.sink_tokens))
+            check(
+                layer,
+                "attention_window_tokens",
+                int(cache.attention_window_size),
+            )
+            check(layer, "attention_heads", int(cache.k.shape[2]))
+            check(layer, "attention_heads", int(cache.v.shape[2]))
+            check(layer, "allow_growth", bool(cache.allow_growth))
+            check(layer, "rope_position_mode", str(cache.rope_position_mode))
+            check(layer, "rope_max_frame_gap", int(cache.rope_max_frame_gap))
+            check(
+                layer,
+                "prompt_first_frame_pin_enabled",
+                bool(cache.prompt_first_frame_pin_enabled),
+            )
+            check(
+                layer,
+                "scene_cut_rope_offset",
+                int(cache.scene_cut_rope_offset),
+            )
+            check(
+                layer,
+                "scene_cut_sink_enabled",
+                bool(cache.scene_cut_sink_enabled),
+            )
+            for tensor_name in ("k", "v"):
+                tensor = getattr(cache, tensor_name)
+                actual_capacity = int(tensor.shape[1])
+                if actual_capacity < expected_cache_tokens:
+                    violations.append(
+                        {
+                            "layer": layer,
+                            "field": f"{tensor_name}_capacity_tokens",
+                            "expected": f">={expected_cache_tokens}",
+                            "actual": actual_capacity,
+                        }
+                    )
+
+        observed = {
+            "cache_token_counts": sorted({int(cache.cache_size) for cache in caches}),
+            "sink_token_counts": sorted({int(cache.sink_tokens) for cache in caches}),
+            "attention_window_token_counts": sorted(
+                {int(cache.attention_window_size) for cache in caches}
+            ),
+            "k_capacity_token_counts": sorted(
+                {int(cache.k.shape[1]) for cache in caches}
+            ),
+            "v_capacity_token_counts": sorted(
+                {int(cache.v.shape[1]) for cache in caches}
+            ),
+        }
+        alignment = {
+            "all_match": not violations,
+            "layer_count": len(caches),
+            "expected": expected,
+            "observed": observed,
+            "resolved": {
+                "local_attn_size": int(arch_config.local_attn_size),
+                "sink_size": int(self.sink_size),
+                "window_size": int(self.sliding_window_num_frames),
+                "tokens_per_frame": int(self.num_token_per_frame),
+                "request_sink_size": getattr(batch, "realtime_causal_sink_size", None),
+                "request_window_size": getattr(
+                    batch, "realtime_causal_kv_cache_num_frames", None
+                ),
+            },
+            "violations": violations,
+        }
+
+        if caches:
+            cache = caches[0]
+            logger.info(
+                "MINWM_RUNTIME_ALIGNMENT local_attn_size=%d sink_size=%d "
+                "window_size=%d rope_position_mode=%s rope_gap=%d "
+                "prompt_first_frame_pin_enabled=%s request_sink_size=%s "
+                "request_window_size=%s allow_growth=%s cache_tokens=%d "
+                "sink_tokens=%d scene_cut_rope_offset=%d "
+                "scene_cut_sink_enabled=%s",
+                int(arch_config.local_attn_size),
+                int(self.sink_size),
+                int(self.sliding_window_num_frames),
+                cache.rope_position_mode,
+                int(cache.rope_max_frame_gap),
+                bool(cache.prompt_first_frame_pin_enabled),
+                getattr(batch, "realtime_causal_sink_size", None),
+                getattr(batch, "realtime_causal_kv_cache_num_frames", None),
+                bool(cache.allow_growth),
+                int(cache.cache_size),
+                int(cache.sink_tokens),
+                int(cache.scene_cut_rope_offset),
+                bool(cache.scene_cut_sink_enabled),
+            )
+        logger.info(
+            "MINWM_RUNTIME_ALIGNMENT_JSON %s",
+            json.dumps(alignment, sort_keys=True, separators=(",", ":")),
+        )
+        if violations:
+            first = violations[0]
+            location = (
+                "cache collection"
+                if first["layer"] is None
+                else f"layer {first['layer']}"
+            )
+            raise RuntimeError(
+                "MinWM runtime alignment mismatch at "
+                f"{location}: {first['field']} expected={first['expected']!r} "
+                f"actual={first['actual']!r}"
+            )
+        self._runtime_alignment_logged = True
+
+    @staticmethod
+    def _configure_startup_pool_cache_for_policy(
+        kv_cache: list[MinWMCausalSelfAttentionKVCache],
+        policy: CausalDMDCachePolicy,
+    ) -> None:
+        """Apply one bucket's logical bounds to a max-sized physical slot."""
+
+        if policy.kv_cache_kwargs.get("allow_growth", False):
+            raise ValueError("MinWM startup KV cache pool does not support growth")
+        for layer, cache_block in enumerate(kv_cache):
+            k_capacity = int(cache_block.k.shape[1])
+            v_capacity = int(cache_block.v.shape[1])
+            if (
+                k_capacity < policy.expected_cache_tokens
+                or v_capacity < policy.expected_cache_tokens
+            ):
+                raise RuntimeError(
+                    "MinWM startup KV cache pool slot is smaller than the selected "
+                    f"resolution bucket at layer {layer}: "
+                    f"required={policy.expected_cache_tokens} "
+                    f"k_capacity={k_capacity} v_capacity={v_capacity}"
+                )
+            cache_block.cache_size = policy.expected_cache_tokens
+            cache_block.attention_window_size = policy.expected_cache_tokens
+            cache_block.sink_tokens = policy.expected_sink_tokens
+            cache_block.allow_growth = False
+
+    def _validate_startup_pool_request_policy(
+        self,
+        batch: Req,
+        server_args: ServerArgs,
+        ctx: CausalDMDForwardContext,
+    ) -> tuple[str, CausalDMDCachePolicy]:
+        """Resolve the exact bucket and reject any startup-contract mismatch."""
+        actual_shape = (ctx.batch_size, ctx.height, ctx.width)
+        bucket_name = self._realtime_kv_cache_pool_bucket_by_shape.get(actual_shape)
+        if bucket_name is None:
+            supported = [
+                {
+                    "bucket": name,
+                    "latent_shape": self._realtime_kv_cache_pool_shapes[name],
+                    "output_height": MINWM_RESOLUTION_BUCKETS[name][1],
+                    "output_width": MINWM_RESOLUTION_BUCKETS[name][0],
+                }
+                for name in self._realtime_kv_cache_pool_policies
+            ]
+            raise ValueError(
+                "MinWM request resolution is not enabled by the launch profile; "
+                f"actual_latent_shape={actual_shape} supported={supported}"
+            )
+
+        pool_policy = self._realtime_kv_cache_pool_policies[bucket_name]
+        policy = self._build_realtime_causal_cache_policy(batch, server_args)
+        mismatch_fields = []
+        if ctx.target_dtype != self._realtime_kv_cache_pool_dtype:
+            mismatch_fields.append(
+                "dtype expected="
+                f"{self._realtime_kv_cache_pool_dtype} actual={ctx.target_dtype}"
+            )
+        for field_name in (
+            "sequence_shard_enabled",
+            "num_attention_heads",
+            "expected_cache_tokens",
+            "expected_sink_tokens",
+            "kv_cache_kwargs",
+        ):
+            expected = getattr(pool_policy, field_name)
+            actual = getattr(policy, field_name)
+            if actual != expected:
+                mismatch_fields.append(
+                    f"{field_name} expected={expected!r} actual={actual!r}"
+                )
+        if mismatch_fields:
+            raise ValueError(
+                "MinWM request does not match the startup KV cache pool; "
+                "per-request allocation is disabled for pooled realtime "
+                "sessions: " + "; ".join(mismatch_fields)
+            )
+        return bucket_name, policy
+
+    def _get_or_acquire_startup_pool_lease(
+        self,
+        pool: RealtimeKVCachePool,
+        cache_state: RealtimeCausalDiTState,
+        *,
+        bucket_name: str,
+        policy: CausalDMDCachePolicy,
+    ) -> tuple[RealtimeKVCachePoolLease, bool]:
+        """Bind one slot to the session or validate its existing lease."""
+        lease = cache_state.kv_cache_pool_lease
+        acquired = lease is None
+        if acquired:
+            with maybe_nvtx_range(
+                "minwm_realtime_kv_cache_pool_acquire",
+                bool(getattr(self, "_current_use_nvtx", False)),
+            ):
+                lease = pool.acquire(bucket_key=bucket_name)
+            try:
+                self._configure_startup_pool_cache_for_policy(lease.kv_cache, policy)
+            except Exception:
+                lease.release()
+                raise
+            cache_state.kv_cache_pool_lease = lease
+            cache_state.kv_cache = lease.kv_cache
+            cache_state.crossattn_cache = lease.crossattn_cache
+        elif lease.bucket_key != bucket_name:
+            raise ValueError(
+                "MinWM resolution cannot change within a realtime session: "
+                f"initial_bucket={lease.bucket_key} requested_bucket={bucket_name}"
+            )
+
+        if (
+            cache_state.kv_cache is not lease.kv_cache
+            or cache_state.crossattn_cache is not lease.crossattn_cache
+        ):
+            raise RuntimeError(
+                "MinWM realtime session cache references do not match its "
+                "startup pool lease"
+            )
+        return lease, acquired
+
+    def _reset_startup_pool_session_cache(
+        self,
+        cache_state: RealtimeCausalDiTState,
+        lease: RealtimeKVCachePoolLease,
+    ) -> None:
+        """Reset logical cursors while preserving the slot's resident tensors."""
+        with maybe_nvtx_range(
+            "minwm_realtime_kv_cache_pool_reset",
+            bool(getattr(self, "_current_use_nvtx", False)),
+        ):
+            # Cursor reset makes stale K/V unreachable. The large backing
+            # tensors stay resident and are intentionally not zero-filled.
+            self._reset_causal_caches(
+                kv_cache=lease.kv_cache,
+                crossattn_cache=lease.crossattn_cache,
+            )
+        cache_state.current_chunk_start_frame = 0
+        cache_state.chunk_idx = 0
+
+    def _prepare_realtime_causal_caches_from_startup_pool(
+        self,
+        batch: Req,
+        server_args: ServerArgs,
+        ctx: CausalDMDForwardContext,
+    ) -> CausalDMDRealtimeCacheContext:
+        pool = self._realtime_kv_cache_pool
+        if pool is None:
+            raise RuntimeError("MinWM realtime KV cache pool is not initialized")
+
+        bucket_name, policy = self._validate_startup_pool_request_policy(
+            batch, server_args, ctx
+        )
+        cache_state, persist_state = self._get_realtime_causal_cache_state(batch)
+        lease, acquired = self._get_or_acquire_startup_pool_lease(
+            pool,
+            cache_state,
+            bucket_name=bucket_name,
+            policy=policy,
+        )
+        if acquired or batch.block_idx == 0:
+            self._reset_startup_pool_session_cache(cache_state, lease)
+
+        return CausalDMDRealtimeCacheContext(
+            cache_state=cache_state,
+            persist_state=persist_state,
+            kv_cache=lease.kv_cache,
+            crossattn_cache=lease.crossattn_cache,
+            current_start_frame=cache_state.current_chunk_start_frame,
+            chunk_idx=cache_state.chunk_idx,
+        )
+
+    def _prepare_realtime_causal_caches(
+        self,
+        batch: Req,
+        server_args: ServerArgs,
+        ctx: CausalDMDForwardContext,
+    ) -> CausalDMDRealtimeCacheContext:
+        if self._realtime_kv_cache_pool is None or batch.session is None:
+            cache_ctx = super()._prepare_realtime_causal_caches(batch, server_args, ctx)
+        else:
+            cache_ctx = self._prepare_realtime_causal_caches_from_startup_pool(
+                batch,
+                server_args,
+                ctx,
+            )
+        if batch.block_idx == 0:
+            self._log_runtime_alignment_once(batch, cache_ctx)
+        if (batch.condition_inputs or {}).get(MINWM_PROMPT_UPDATED_CONDITION):
+            self._reset_crossattn_cache(cache_ctx.crossattn_cache)
+            condition_switch = (batch.condition_inputs or {}).get(
+                MINWM_CONDITION_SWITCH_CONDITION, "prompt"
+            )
+            if condition_switch not in {"prompt", "scene_cut"}:
+                raise ValueError("MinWM condition switch must be prompt or scene_cut")
+            for cache_block in cache_ctx.kv_cache:
+                if condition_switch == "scene_cut":
+                    cache_block.mark_scene_cut()
+                else:
+                    cache_block.mark_prompt_switch()
+
+        if batch.block_idx == 0 and cache_ctx.current_start_frame == 0:
+            if batch.image_latent is None:
+                return cache_ctx
+            if batch.image_latent.shape[2] != 1:
+                raise ValueError(
+                    "MinWM requires exactly one encoded reference latent on chunk zero"
+                )
+            reference_kwargs = dict(ctx.pos_cond_kwargs)
+            if reference_kwargs["action"].ndim == 4:
+                reference_kwargs["action"] = torch.zeros(
+                    (
+                        ctx.batch_size,
+                        1,
+                        reference_kwargs["action"].shape[2],
+                        reference_kwargs["action"].shape[3],
+                    ),
+                    dtype=reference_kwargs["action"].dtype,
+                    device=ctx.device,
+                )
+            else:
+                reference_kwargs["action"] = torch.zeros(
+                    (ctx.batch_size, 1), dtype=torch.long, device=ctx.device
+                )
+            self._warm_up_causal_context_cache(
+                batch,
+                server_args,
+                context_input=batch.image_latent,
+                prompt_embeds=ctx.prompt_embeds,
+                kv_cache=cache_ctx.kv_cache,
+                crossattn_cache=cache_ctx.crossattn_cache,
+                current_start_frame=0,
+                image_kwargs=ctx.image_kwargs,
+                pos_cond_kwargs=reference_kwargs,
+                target_dtype=ctx.target_dtype,
+                autocast_enabled=ctx.autocast_enabled,
+            )
+            cache_ctx.current_start_frame = 1
+            cache_ctx.cache_state.current_chunk_start_frame = 1
+        return cache_ctx
+
+    def _commit_current_actions(
+        self,
+        cache_ctx: CausalDMDRealtimeCacheContext,
+        pos_cond_kwargs: dict,
+        num_frames: int,
+    ) -> None:
+        history = cache_ctx.cache_state.runtime_cache[MINWM_ACTION_HISTORY_CACHE]
+        current = pos_cond_kwargs["action"][:, -num_frames:]
+        history_frames = int(self.transformer.config.action_history_frames)
+        cache_ctx.cache_state.runtime_cache[MINWM_ACTION_HISTORY_CACHE] = torch.cat(
+            [history, current], dim=1
+        )[:, -history_frames:]
+
+    def _prepare_chunk_action_token_residual(
+        self,
+        ctx: CausalDMDForwardContext,
+    ) -> torch.Tensor:
+        """Materialize the action condition once for this forward context."""
+        p_t, p_h, p_w = self.transformer.patch_size
+        with maybe_nvtx_range(
+            MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE,
+            bool(getattr(self, "_current_use_nvtx", False)),
+        ):
+            with torch.autocast(
+                device_type=current_platform.device_type,
+                dtype=ctx.target_dtype,
+                enabled=ctx.autocast_enabled,
+            ):
+                return self.transformer.prepare_action_token_residual(
+                    ctx.pos_cond_kwargs["action"],
+                    num_frames=ctx.num_frames // p_t,
+                    height=ctx.height // p_h,
+                    width=ctx.width // p_w,
+                    dtype=ctx.target_dtype,
+                )
+
+    def _forward_causal_transformer(self, batch: Req, **kwargs) -> torch.Tensor:
+        output = self._forward_causal_transformer_impl(batch, **kwargs)
+        index = getattr(self, "_parity_forward_index", 0)
+        prompt = kwargs["prompt_embeds"] if index == 0 else None
+        _parity_dump(
+            f"forward_{index:03d}.pt",
+            {
+                "block_idx": int(batch.block_idx),
+                "latent_model_input": kwargs["latent_model_input"],
+                "prompt_embeds": prompt,
+                "timestep": kwargs["timestep"],
+                "action": kwargs["pos_cond_kwargs"].get("action"),
+                "output": output,
+            },
+        )
+        self._parity_forward_index = index + 1
+        return output
+
+    def _minwm_cuda_graph_key(
+        self,
+        *,
+        latent_model_input: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        timestep: torch.Tensor,
+        kv_cache: list,
+        crossattn_cache: list,
+        pos_cond_kwargs: dict[str, Any],
+        image_kwargs: dict[str, Any],
+        current_timestep: int,
+        attn_metadata,
+    ) -> tuple | None:
+        if (
+            not getattr(self, "_minwm_cuda_graph_enabled", False)
+            or current_timestep == 0
+            or attn_metadata is not None
+            or image_kwargs
+            or set(pos_cond_kwargs) != {"action", "action_token_residual"}
+            or os.environ.get("MINWM_PARITY_DUMP_DIR")
+            or not latent_model_input.is_cuda
+            or torch.version.hip is not None
+        ):
+            return None
+        if not isinstance(prompt_embeds, torch.Tensor):
+            return None
+        action = pos_cond_kwargs["action"]
+        action_token_residual = pos_cond_kwargs["action_token_residual"]
+        if not isinstance(action, torch.Tensor) or not isinstance(
+            action_token_residual, torch.Tensor
+        ):
+            return None
+        if not kv_cache or not crossattn_cache:
+            return None
+
+        first_cache = kv_cache[0]
+        if not isinstance(first_cache, MinWMCausalSelfAttentionKVCache):
+            return None
+        plan = first_cache.last_attention_plan
+        if (
+            first_cache.allow_growth
+            or first_cache.rope_position_mode != "block_relative"
+            or plan is None
+            or plan.selected_len != first_cache.cache_size
+            or plan.current_local_end != first_cache.cache_size
+        ):
+            return None
+        if any(
+            cache.local_end_index_int != cache.cache_size for cache in kv_cache
+        ) or any(not cache.is_init for cache in crossattn_cache):
+            return None
+
+        cache_pointers = tuple(
+            (
+                cache.k.data_ptr(),
+                cache.v.data_ptr(),
+                cache.rotated_k.data_ptr() if cache.rotated_k is not None else 0,
+            )
+            for cache in kv_cache
+        )
+        crossattn_pointers = tuple(
+            (cache.k.data_ptr(), cache.v.data_ptr()) for cache in crossattn_cache
+        )
+        plan_signature = (
+            plan.selected_len,
+            plan.num_new_tokens,
+            plan.current_local_start,
+            plan.current_local_end,
+            plan.rope_temporal_offset,
+            plan.pinned_token_start,
+            plan.pinned_token_end,
+            plan.prompt_pin_frame,
+            _cuda_graph_attention_plan_signature(plan),
+        )
+        return (
+            cache_pointers,
+            crossattn_pointers,
+            plan_signature,
+            _cuda_graph_tensor_signature(latent_model_input),
+            _cuda_graph_tensor_signature(prompt_embeds),
+            _cuda_graph_tensor_signature(timestep),
+            _cuda_graph_tensor_signature(action_token_residual),
+        )
+
+    def _forward_causal_transformer_impl(
+        self,
+        batch: Req,
+        *,
+        latent_model_input: torch.Tensor,
+        prompt_embeds,
+        timestep: torch.Tensor,
+        kv_cache,
+        crossattn_cache,
+        current_start_tokens: int,
+        start_frame: int,
+        image_kwargs: dict,
+        pos_cond_kwargs: dict,
+        current_timestep: int,
+        attn_metadata,
+        target_dtype: torch.dtype,
+        autocast_enabled: bool,
+    ) -> torch.Tensor:
+        graph_key = None
+        if not self._causal_sequence_shard_enabled(batch):
+            graph_key = self._minwm_cuda_graph_key(
+                latent_model_input=latent_model_input,
+                prompt_embeds=prompt_embeds,
+                timestep=timestep,
+                kv_cache=kv_cache,
+                crossattn_cache=crossattn_cache,
+                pos_cond_kwargs=pos_cond_kwargs,
+                image_kwargs=image_kwargs,
+                current_timestep=current_timestep,
+                attn_metadata=attn_metadata,
+            )
+        with (
+            torch.autocast(
+                device_type=current_platform.device_type,
+                dtype=target_dtype,
+                enabled=autocast_enabled,
+            ),
+            set_forward_context(
+                current_timestep=current_timestep,
+                attn_metadata=attn_metadata,
+                forward_batch=batch,
+            ),
+        ):
+            if graph_key is None:
+                return self.transformer(
+                    latent_model_input,
+                    prompt_embeds,
+                    timestep,
+                    kv_cache=kv_cache,
+                    crossattn_cache=crossattn_cache,
+                    current_start=current_start_tokens,
+                    start_frame=start_frame,
+                    **image_kwargs,
+                    **pos_cond_kwargs,
+                )
+
+            if (
+                self._minwm_cuda_graph_runner is None
+                or self._minwm_cuda_graph_runner.key != graph_key
+            ):
+                self._minwm_cuda_graph_runner = _MinWMCudaGraphRunner(graph_key)
+            runner = self._minwm_cuda_graph_runner
+            action_token_residual = pos_cond_kwargs["action_token_residual"]
+            attention_plan = kv_cache[0].last_attention_plan
+            if not isinstance(attention_plan, MinWMCausalAttentionKVPlan):
+                raise RuntimeError("MinWM CUDA graph requires an attention plan")
+
+            if runner.graph is None:
+                attention_plan = self.transformer.prepare_causal_attention_plan(
+                    latent_model_input,
+                    kv_cache=kv_cache,
+                    current_start=current_start_tokens,
+                    start_frame=start_frame,
+                )
+                # CUDA Graph records raw addresses for tensors created before
+                # capture. Retain the plan (including its RoPE tables) so the
+                # caching allocator cannot recycle those addresses on a later
+                # realtime chunk.
+                runner.capture_dependencies = attention_plan
+
+                def capture_forward(
+                    static_latent: torch.Tensor,
+                    static_prompt: torch.Tensor,
+                    static_timestep: torch.Tensor,
+                    static_action_token_residual: torch.Tensor,
+                ) -> torch.Tensor:
+                    return self.transformer(
+                        static_latent,
+                        static_prompt,
+                        static_timestep,
+                        kv_cache=kv_cache,
+                        crossattn_cache=crossattn_cache,
+                        current_start=current_start_tokens,
+                        start_frame=start_frame,
+                        action_token_residual=static_action_token_residual,
+                        precomputed_attention_plan=attention_plan,
+                    )
+
+            else:
+                # Replay does not execute Python, so this callable is unused.
+                capture_forward = None
+
+            graph_output = runner.run(
+                latent=latent_model_input,
+                prompt=prompt_embeds,
+                timestep=timestep,
+                action_token_residual=action_token_residual,
+                attention_plan=attention_plan,
+                capture_forward=capture_forward,
+            )
+            # The captured graph owns a single static output allocation.
+            # Downstream scheduler work can still consume it when the next
+            # denoising replay starts, so hand out an independent snapshot.
+            return graph_output.clone()
+
+    @torch.no_grad()
+    def forward(self, batch: Req, server_args: ServerArgs) -> Req:
+        component_name = self._component_name_for_stage_module(
+            self.transformer, "transformer"
+        )
+        with self.use_declared_component(
+            component_name=component_name,
+            module=self.transformer,
+            phase=component_name,
+        ):
+            return self._forward_impl(batch, server_args)
+
+    def _forward_impl(self, batch: Req, server_args: ServerArgs) -> Req:
+        self._minwm_cuda_graph_enabled = bool(
+            getattr(server_args, "enable_cuda_graph", False)
+        )
+        set_minwm_cuda_graph_active(self._minwm_cuda_graph_enabled)
+        if self._minwm_cuda_graph_enabled and bool(
+            getattr(server_args, "enable_torch_compile", False)
+        ):
+            raise ValueError(
+                "MinWM CUDA graph cannot be combined with whole-DiT torch.compile."
+            )
+        if batch.block_idx == 0:
+            self._parity_forward_index = 0
+        ctx = self._prepare_causal_dmd_forward_context(batch, server_args)
+        cache_ctx = self._prepare_realtime_causal_caches(batch, server_args, ctx)
+        # Keep the reference warmup on its one-frame noop action. The generated
+        # chunk gets a fresh residual after that warmup, and this context carries
+        # it through all DMD forwards plus the clean cache commit.
+        ctx.pos_cond_kwargs["action_token_residual"] = (
+            self._prepare_chunk_action_token_residual(ctx)
+        )
+        current_latents = self._denoise_realtime_causal_chunk(
+            batch,
+            server_args,
+            ctx=ctx,
+            cache_ctx=cache_ctx,
+            chunk_latents=ctx.latents,
+            prepare_model_input=lambda latents: latents,
+            prepare_context_input=lambda latents: latents,
+        )
+        self._commit_current_actions(cache_ctx, ctx.pos_cond_kwargs, ctx.num_frames)
+        self._advance_realtime_causal_cache(cache_ctx, num_frames=ctx.num_frames)
+        batch.latents = current_latents
+        batch.raw_latent_shape = current_latents.shape
+        _parity_dump(f"chunk_{int(batch.block_idx):03d}_latents.pt", current_latents)
+        if not cache_ctx.persist_state:
+            cache_ctx.cache_state.dispose()
+        return batch
+
+    def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
+        result = VerificationResult()
+        result.add_check(
+            "image_latent", batch.image_latent, V.none_or_tensor_with_dims(5)
+        )
+        result.add_check("latents", batch.latents, [V.is_tensor, V.with_dims(5)])
+        result.add_check("timesteps", batch.timesteps, [V.is_tensor, V.with_dims(1)])
+        result.add_check("scheduler", batch.scheduler, V.not_none)
+        result.add_check("prompt_embeds", batch.prompt_embeds, V.list_not_empty)
+        return result
+
+
+class MinWMCausalUniPCDenoisingStage(MinWMCausalDMDDenoisingStage):
+    """Run minWM V3's per-chunk UniPC loop while retaining realtime KV state."""
+
+    def _denoise_causal_dmd_chunk(
+        self,
+        batch: Req,
+        server_args: ServerArgs,
+        *,
+        chunk_latents: torch.Tensor,
+        scheduler,
+        timesteps: torch.Tensor,
+        prompt_embeds,
+        kv_cache,
+        crossattn_cache,
+        current_start_tokens: int,
+        start_frame: int,
+        image_kwargs: dict,
+        pos_cond_kwargs: dict,
+        target_dtype: torch.dtype,
+        autocast_enabled: bool,
+        device: torch.device,
+        attn_raw_latent_shape: tuple[int, int, int],
+        prepare_model_input: Callable[[torch.Tensor], torch.Tensor],
+        progress_bar=None,
+    ) -> tuple[torch.Tensor, object | None]:
+        # Native V3 applies UniPC to BFCHW tensors. Keep the same layout at the
+        # scheduler boundary; the transformer still consumes BCFHW.
+        latents_btchw = chunk_latents.permute(0, 2, 1, 3, 4).contiguous()
+        attn_metadata = None
+        for i, timestep in enumerate(timesteps):
+            current_latents = latents_btchw.permute(0, 2, 1, 3, 4)
+            latent_model_input = prepare_model_input(current_latents).to(target_dtype)
+            attn_metadata = self._build_causal_attn_metadata(
+                batch,
+                server_args,
+                current_timestep=i,
+                raw_latent_shape=attn_raw_latent_shape,
+                device=device,
+            )
+            timestep_2d = self._expand_timestep(
+                timestep, latent_model_input.shape[0], latent_model_input.device
+            )
+            flow_prediction = self._forward_causal_transformer(
+                batch,
+                latent_model_input=latent_model_input,
+                prompt_embeds=prompt_embeds,
+                timestep=timestep_2d.unsqueeze(1),
+                kv_cache=kv_cache,
+                crossattn_cache=crossattn_cache,
+                current_start_tokens=current_start_tokens,
+                start_frame=start_frame,
+                image_kwargs=image_kwargs,
+                pos_cond_kwargs=pos_cond_kwargs,
+                current_timestep=i,
+                attn_metadata=attn_metadata,
+                target_dtype=target_dtype,
+                autocast_enabled=autocast_enabled,
+            )
+            flow_prediction_btchw = flow_prediction.permute(0, 2, 1, 3, 4)
+            latents_btchw = scheduler.step(
+                flow_prediction_btchw,
+                timestep,
+                latents_btchw,
+                return_dict=False,
+            )[0]
+            if progress_bar is not None:
+                progress_bar.update()
+
+        return latents_btchw.permute(0, 2, 1, 3, 4), attn_metadata
+
+
+class MinWMCausalVaeDecodingStage(CausalVaeDecodingStage):
+    """Seed residual Wan2.2 VAE state with the reference latent exactly once."""
+
+    def _decode_wan_with_persistent_cache(
+        self,
+        latents: torch.Tensor,
+        *,
+        first_chunk: bool,
+    ) -> torch.Tensor:
+        # minWM's WanVAEWrapper converts the cached decoder result to FP32
+        # before pixel-space scaling. Preserve that output boundary.
+        return (
+            super()
+            ._decode_wan_with_persistent_cache(latents, first_chunk=first_chunk)
+            .float()
+        )
+
+    @torch.no_grad()
+    def forward(self, batch: Req, server_args: ServerArgs):
+        generated_latents = batch.latents
+        original_block_idx = batch.block_idx
+        session = getattr(batch, "session", None)
+        causal_state = (
+            get_realtime_causal_dit_state(session) if session is not None else None
+        )
+        if batch.block_idx == 0 and causal_state is not None:
+            causal_state.runtime_cache.pop(MINWM_T2V_FIRST_LATENT_CACHE, None)
+
+        if batch.block_idx == 0 and batch.image_latent is not None:
+            batch.latents = torch.cat([batch.image_latent, generated_latents], dim=2)
+        elif (
+            batch.block_idx == 0
+            and batch.image_latent is None
+            and causal_state is not None
+        ):
+            # Wan2.2's residual decoder cannot continue from a one-latent first
+            # call: on the next call one upsample branch produces two temporal
+            # values while its shortcut produces four. Preserve T2V's immediate
+            # first-frame response, then use this latent to reseed the decoder
+            # together with the first regular block below.
+            causal_state.runtime_cache[MINWM_T2V_FIRST_LATENT_CACHE] = (
+                generated_latents.detach().clone()
+            )
+        elif (
+            batch.block_idx == 1
+            and batch.image_latent is None
+            and causal_state is not None
+        ):
+            first_latent = causal_state.runtime_cache.pop(
+                MINWM_T2V_FIRST_LATENT_CACHE, None
+            )
+            if first_latent is not None:
+                batch.latents = torch.cat([first_latent, generated_latents], dim=2)
+                # Make the base stage reset and seed the VAE as a fresh causal
+                # decode. The leading pixel frame was already emitted by block
+                # zero and is removed from this block's output below.
+                batch.block_idx = 0
+        try:
+            result = super().forward(batch, server_args)
+            if (
+                original_block_idx == 1
+                and batch.latents.shape[2] > generated_latents.shape[2]
+            ):
+                if isinstance(result.output, torch.Tensor):
+                    result.output = result.output[:, :, 1:]
+                elif result.output is not None:
+                    result.output = [sample[:, 1:] for sample in result.output]
+            return result
+        finally:
+            batch.block_idx = original_block_idx
+            batch.latents = generated_latents
