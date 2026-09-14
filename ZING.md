@@ -1,8 +1,10 @@
 # Zing-0.5 on SGLang
 
 This repository is a Seedleap-maintained SGLang inference fork for
-[Zing-0.5](https://modelscope.cn/models/seedleap/Zing-0.5). It serves the model
-through SGLang's realtime WebSocket API and supports:
+[Zing-0.5](https://modelscope.cn/models/seedleap/Zing-0.5). The reference
+PyTorch inference implementation is available in
+[zing-world-model](https://github.com/seedleap/zing-world-model). This fork
+serves the model through SGLang's realtime WebSocket API and supports:
 
 - text-to-video and image-initialized video generation;
 - W/A/S/D movement and I/J/K/L camera controls;
