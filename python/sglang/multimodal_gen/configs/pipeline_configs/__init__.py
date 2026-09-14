@@ -64,7 +64,7 @@ from sglang.multimodal_gen.configs.pipeline_configs.wan import (
     WanT2V720PConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.zimage import ZImagePipelineConfig
-from sglang.multimodal_gen.configs.pipeline_configs.zing import MinWMCausalDMDConfig
+from sglang.multimodal_gen.configs.pipeline_configs.zing import ZingCausalDMDConfig
 
 __all__ = [
     "Cosmos3Config",
@@ -98,7 +98,7 @@ __all__ = [
     "LTX23PipelineConfig",
     "LingBotWorldCausalDMDConfig",
     "LingBotWorldV2CausalDMDConfig",
-    "MinWMCausalDMDConfig",
+    "ZingCausalDMDConfig",
     "LingBotVideoMoEPipelineConfig",
     "FastH3PipelineConfig",
     "MiniMaxH3PipelineConfig",

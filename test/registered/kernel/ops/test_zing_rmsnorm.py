@@ -4,11 +4,11 @@ import pytest
 import torch
 
 from sglang.kernels.ops.diffusion.norm.zing_rmsnorm_jit import (
-    can_use_minwm_rmsnorm,
-    is_supported_minwm_rmsnorm_hidden_size,
-    minwm_fused_qknorm,
-    minwm_fused_qknorm_unchecked,
-    minwm_rmsnorm,
+    can_use_zing_rmsnorm,
+    is_supported_zing_rmsnorm_hidden_size,
+    zing_fused_qknorm,
+    zing_fused_qknorm_unchecked,
+    zing_rmsnorm,
 )
 from sglang.test.ci.ci_register import register_cuda_ci
 
@@ -83,7 +83,7 @@ def _make_strided_qk(
     ids=lambda value: value if isinstance(value, str) else None,
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_minwm_fused_qknorm_matches_round_before_weight_reference(
+def test_zing_fused_qknorm_matches_round_before_weight_reference(
     shape_name: str, num_tokens: int, dtype: torch.dtype
 ) -> None:
     del shape_name
@@ -92,8 +92,8 @@ def test_minwm_fused_qknorm_matches_round_before_weight_reference(
     query_weight = torch.randn(HIDDEN_SIZE, device="cuda", dtype=dtype)
     key_weight = torch.randn(HIDDEN_SIZE, device="cuda", dtype=dtype)
 
-    query_out, key_out = minwm_fused_qknorm(query, key, query_weight, key_weight, EPS)
-    unchecked_query_out, unchecked_key_out = minwm_fused_qknorm_unchecked(
+    query_out, key_out = zing_fused_qknorm(query, key, query_weight, key_weight, EPS)
+    unchecked_query_out, unchecked_key_out = zing_fused_qknorm_unchecked(
         query, key, query_weight, key_weight, EPS
     )
 
@@ -105,23 +105,23 @@ def test_minwm_fused_qknorm_matches_round_before_weight_reference(
     assert torch.equal(unchecked_key_out, key_out)
 
 
-def test_minwm_rmsnorm_covers_cross_attention_shape() -> None:
+def test_zing_rmsnorm_covers_cross_attention_shape() -> None:
     torch.manual_seed(20260824)
     query = torch.randn(1, 512, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
     weight = torch.randn(HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
 
-    output = minwm_rmsnorm(query, weight, EPS)
+    output = zing_rmsnorm(query, weight, EPS)
 
     assert output.shape == query.shape
     assert output.is_contiguous()
     _assert_strict_numerics(output, _reference(query, weight))
 
 
-def test_minwm_rmsnorm_uses_cast_before_weight_multiply() -> None:
+def test_zing_rmsnorm_uses_cast_before_weight_multiply() -> None:
     torch.manual_seed(20260824)
     input = torch.randn(64, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
     weight = torch.randn(HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
-    output = minwm_rmsnorm(input, weight, EPS)
+    output = zing_rmsnorm(input, weight, EPS)
     reference = _reference(input, weight)
     input_float = input.float()
     multiply_before_rounding = (
@@ -137,26 +137,26 @@ def test_minwm_rmsnorm_uses_cast_before_weight_multiply() -> None:
     assert reference_distance < wrong_order_distance
 
 
-def test_minwm_fused_qknorm_torch_compile_fullgraph() -> None:
+def test_zing_fused_qknorm_torch_compile_fullgraph() -> None:
     query, key = _make_strided_qk(195, torch.bfloat16)
     query_weight = torch.randn(HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
     key_weight = torch.randn(HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
 
-    compiled = torch.compile(minwm_fused_qknorm, fullgraph=True)
+    compiled = torch.compile(zing_fused_qknorm, fullgraph=True)
     query_out, key_out = compiled(query, key, query_weight, key_weight, EPS)
 
     _assert_strict_numerics(query_out, _reference(query, query_weight))
     _assert_strict_numerics(key_out, _reference(key, key_weight))
 
 
-def test_minwm_model_qk_norm_integration() -> None:
-    from sglang.multimodal_gen.runtime.models.dits.zing import _minwm_qk_norm_op
+def test_zing_model_qk_norm_integration() -> None:
+    from sglang.multimodal_gen.runtime.models.dits.zing import _zing_qk_norm_op
 
     query, key = _make_strided_qk(195, torch.bfloat16)
     query_weight = torch.randn(HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
     key_weight = torch.randn(HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
 
-    query_out, key_out = _minwm_qk_norm_op(
+    query_out, key_out = _zing_qk_norm_op(
         query, key, query_weight, key_weight, EPS, num_heads=24
     )
 
@@ -166,14 +166,14 @@ def test_minwm_model_qk_norm_integration() -> None:
     _assert_strict_numerics(key_out.flatten(-2), _reference(key, key_weight))
 
 
-def test_minwm_rmsnorm_support_gate() -> None:
-    assert is_supported_minwm_rmsnorm_hidden_size(3072)
-    assert not is_supported_minwm_rmsnorm_hidden_size(128)
-    assert not is_supported_minwm_rmsnorm_hidden_size(3073)
+def test_zing_rmsnorm_support_gate() -> None:
+    assert is_supported_zing_rmsnorm_hidden_size(3072)
+    assert not is_supported_zing_rmsnorm_hidden_size(128)
+    assert not is_supported_zing_rmsnorm_hidden_size(3073)
 
     cpu_input = torch.randn(2, HIDDEN_SIZE, dtype=torch.bfloat16)
     cpu_weight = torch.randn(HIDDEN_SIZE, dtype=torch.bfloat16)
-    assert not can_use_minwm_rmsnorm(cpu_input, cpu_weight)
+    assert not can_use_zing_rmsnorm(cpu_input, cpu_weight)
 
 
 if __name__ == "__main__":

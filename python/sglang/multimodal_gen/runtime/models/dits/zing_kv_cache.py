@@ -1,5 +1,5 @@
 # Copyright 2026 Seedleap.ai
-# Adapted from the Apache-2.0 minWM causal-cache implementation.
+# Adapted from the Apache-2.0 Zing causal-cache implementation.
 # SPDX-License-Identifier: Apache-2.0
 """Zing raw-K cache metadata and window selection."""
 
@@ -15,7 +15,7 @@ from sglang.multimodal_gen.runtime.layers.kvcache.causal_attention_cache import 
 
 
 @dataclass(slots=True)
-class MinWMCausalAttentionKVView:
+class ZingCausalAttentionKVView:
     k: torch.Tensor
     v: torch.Tensor
     query_position_ids: torch.Tensor
@@ -32,8 +32,8 @@ class MinWMCausalAttentionKVView:
 
 
 @dataclass(slots=True)
-class MinWMCausalAttentionKVPlan:
-    """Layer-independent cache selection for one MinWM transformer pass."""
+class ZingCausalAttentionKVPlan:
+    """Layer-independent cache selection for one Zing transformer pass."""
 
     state_key: tuple
     current_position_ids: torch.Tensor
@@ -68,10 +68,10 @@ class MinWMCausalAttentionKVPlan:
 
 
 @dataclass(slots=True)
-class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
-    """One MinWM layer's unrotated K/V and position metadata.
+class ZingCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
+    """One Zing layer's unrotated K/V and position metadata.
 
-    MinWM commit 4220c8a caches K after RMSNorm but before RoPE. RoPE is
+    Zing commit 4220c8a caches K after RMSNorm but before RoPE. RoPE is
     reconstructed after selecting the visible sink/pin/tail window so that
     ``block_relative`` positions follow the exact visible token order.
     """
@@ -93,17 +93,17 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
     pending_scene_cut_pin: bool = False
     rotated_k: torch.Tensor | None = None
     rotated_k_is_valid: bool = False
-    prepared_attention_plan: MinWMCausalAttentionKVPlan | None = None
-    last_attention_plan: MinWMCausalAttentionKVPlan | None = None
+    prepared_attention_plan: ZingCausalAttentionKVPlan | None = None
+    last_attention_plan: ZingCausalAttentionKVPlan | None = None
 
     def __post_init__(self) -> None:
         CausalSelfAttentionKVCache.__post_init__(self)
         if self.rope_position_mode not in {"absolute", "block_relative"}:
             raise ValueError(
-                f"unsupported MinWM rope_position_mode={self.rope_position_mode!r}"
+                f"unsupported Zing rope_position_mode={self.rope_position_mode!r}"
             )
         if self.rope_max_frame_gap < 1:
-            raise ValueError("MinWM rope_max_frame_gap must be >= 1")
+            raise ValueError("Zing rope_max_frame_gap must be >= 1")
 
     def reset_indices(self) -> None:
         CausalSelfAttentionKVCache.reset_indices(self)
@@ -128,7 +128,7 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
 
     def set_current_position_ids(self, position_ids: torch.Tensor) -> None:
         if position_ids.ndim != 2 or position_ids.shape[1] != 3:
-            raise ValueError("MinWM position_ids must have shape [tokens, 3]")
+            raise ValueError("Zing position_ids must have shape [tokens, 3]")
         self.current_position_ids = position_ids
 
     def mark_prompt_switch(self) -> None:
@@ -141,7 +141,7 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
         self.pending_prompt_switch = False
         if self.rope_position_mode == "block_relative" and self.scene_cut_rope_offset:
             raise ValueError(
-                "MinWM block_relative RoPE does not support nonzero scene-cut offset"
+                "Zing block_relative RoPE does not support nonzero scene-cut offset"
             )
         self.rope_temporal_offset += int(self.scene_cut_rope_offset)
         self.pending_scene_cut_pin = self.scene_cut_sink_enabled
@@ -214,7 +214,7 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
 
         sink_tokens = min(int(self.sink_tokens), total_tokens)
         if sink_tokens >= max_tokens:
-            raise ValueError("MinWM sink_size must be smaller than local_attn_size")
+            raise ValueError("Zing sink_size must be smaller than local_attn_size")
 
         pinned = self._pinned_indices(token_ids)
         pin_start = int(pinned[0].item()) if pinned.numel() else -1
@@ -236,7 +236,7 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
         extra_pinned_tokens = pin_len if include_pinned else 0
         tail_tokens = max_tokens - protected_sink_tokens - extra_pinned_tokens
         if tail_tokens <= 0:
-            raise ValueError("MinWM dynamic pin must be smaller than local_attn_size")
+            raise ValueError("Zing dynamic pin must be smaller than local_attn_size")
 
         pieces = []
         if protected_sink_tokens:
@@ -280,7 +280,7 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
         num_query_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.position_ids is None or self.rope_position_ids is None:
-            raise RuntimeError("MinWM cache position metadata is not initialized")
+            raise RuntimeError("Zing cache position metadata is not initialized")
         if self.rope_position_mode == "absolute":
             key_position_ids = self.rope_position_ids
         else:
@@ -327,10 +327,10 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
         *,
         current_chunk_start: int,
         position_ids: torch.Tensor,
-    ) -> MinWMCausalAttentionKVPlan:
+    ) -> ZingCausalAttentionKVPlan:
         """Select cache metadata once so all transformer layers can reuse it."""
         if position_ids.ndim != 2 or position_ids.shape[1] != 3:
-            raise ValueError("MinWM position_ids must have shape [tokens, 3]")
+            raise ValueError("Zing position_ids must have shape [tokens, 3]")
         num_new_tokens = int(position_ids.shape[0])
         state_key = self._attention_plan_state_key(
             current_chunk_start=current_chunk_start,
@@ -358,7 +358,7 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
             ).flatten()
             if start_matches.numel() != 1:
                 raise RuntimeError(
-                    "MinWM causal KV cache cannot recompute an evicted/non-unique chunk"
+                    "Zing causal KV cache cannot recompute an evicted/non-unique chunk"
                 )
             local_start = int(start_matches[0].item())
             local_stop = local_start + num_new_tokens
@@ -366,16 +366,16 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
                 self.token_ids[local_start:local_stop], current_token_ids
             ):
                 raise RuntimeError(
-                    "MinWM causal KV cache current chunk is not contiguous"
+                    "Zing causal KV cache current chunk is not contiguous"
                 )
             if not torch.equal(self.position_ids[local_start:local_stop], position_ids):
                 raise ValueError(
-                    "MinWM active chunk position changed before final cache update"
+                    "Zing active chunk position changed before final cache update"
                 )
             query_position_ids, key_position_ids = self._attention_position_ids(
                 num_query_tokens=num_new_tokens
             )
-            plan = MinWMCausalAttentionKVPlan(
+            plan = ZingCausalAttentionKVPlan(
                 state_key=state_key,
                 current_position_ids=position_ids,
                 current_chunk_start=current_chunk_start,
@@ -408,7 +408,7 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
 
         if current_chunk_start < global_end:
             raise RuntimeError(
-                "MinWM causal KV cache cannot append over evicted history"
+                "Zing causal KV cache cannot append over evicted history"
             )
         if self.pending_prompt_switch:
             self.prompt_pin_frame = int(position_ids[0, 0].item())
@@ -471,7 +471,7 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
             )
             key_position_ids[:, 0] = compressed[frame_index]
         query_position_ids = key_position_ids[-num_new_tokens:]
-        plan = MinWMCausalAttentionKVPlan(
+        plan = ZingCausalAttentionKVPlan(
             state_key=state_key,
             current_position_ids=position_ids,
             current_chunk_start=current_chunk_start,
@@ -502,7 +502,7 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
         self.last_attention_plan = plan
         return plan
 
-    def set_prepared_attention_plan(self, plan: MinWMCausalAttentionKVPlan) -> None:
+    def set_prepared_attention_plan(self, plan: ZingCausalAttentionKVPlan) -> None:
         self.current_position_ids = plan.current_position_ids
         self.prepared_attention_plan = plan
 
@@ -510,7 +510,7 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
     def _select_kv_with_plan(
         old_value: torch.Tensor,
         new_value: torch.Tensor,
-        plan: MinWMCausalAttentionKVPlan,
+        plan: ZingCausalAttentionKVPlan,
     ) -> torch.Tensor:
         pieces = []
         if plan.old_selected_indices is not None and plan.old_selected_indices.numel():
@@ -526,12 +526,12 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
     def _apply_attention_plan(
         self,
         *,
-        plan: MinWMCausalAttentionKVPlan,
+        plan: ZingCausalAttentionKVPlan,
         key: torch.Tensor,
         value: torch.Tensor,
         cache_head_start: int | None,
         debug_name: str,
-    ) -> MinWMCausalAttentionKVView:
+    ) -> ZingCausalAttentionKVView:
         head_slice = self._cache_head_slice(self.k, key, cache_head_start, debug_name)
         if self.global_end_index_int is not None and (
             self.global_end_index_int != plan.global_end_before
@@ -594,7 +594,7 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
         rotated_k = self._head_view(
             self._ensure_rotated_k()[:, : plan.selected_len], head_slice
         )
-        return MinWMCausalAttentionKVView(
+        return ZingCausalAttentionKVView(
             k=self._head_view(self.k[:, : plan.selected_len], head_slice),
             v=self._head_view(self.v[:, : plan.selected_len], head_slice),
             query_position_ids=plan.query_position_ids,
@@ -618,22 +618,22 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
         current_chunk_start: int,
         cache_head_start: int | None = None,
         recent_window_tokens: int | None = None,
-        debug_name: str = "MinWM causal KV cache",
+        debug_name: str = "Zing causal KV cache",
         position_ids: torch.Tensor | None = None,
-    ) -> MinWMCausalAttentionKVView:
+    ) -> ZingCausalAttentionKVView:
         if recent_window_tokens is not None:
             raise ValueError(
-                "MinWM position-aware cache does not use recent_window_tokens"
+                "Zing position-aware cache does not use recent_window_tokens"
             )
         if key.shape != value.shape:
-            raise ValueError("MinWM attention key/value shapes must match")
+            raise ValueError("Zing attention key/value shapes must match")
         position_ids = (
             self.current_position_ids if position_ids is None else position_ids
         )
         if position_ids is None:
-            raise ValueError("MinWM cache requires current position_ids")
+            raise ValueError("Zing cache requires current position_ids")
         if int(position_ids.shape[0]) != int(key.shape[1]):
-            raise ValueError("MinWM position_ids length must match the current K/V")
+            raise ValueError("Zing position_ids length must match the current K/V")
 
         plan = self.prepared_attention_plan
         self.prepared_attention_plan = None
@@ -646,7 +646,7 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
             plan.current_chunk_start != current_chunk_start
             or plan.num_new_tokens != int(key.shape[1])
         ):
-            raise RuntimeError("MinWM prepared cache plan does not match current K/V")
+            raise RuntimeError("Zing prepared cache plan does not match current K/V")
         return self._apply_attention_plan(
             plan=plan,
             key=key,
@@ -656,11 +656,11 @@ class MinWMCausalSelfAttentionKVCache(CausalSelfAttentionKVCache):
         )
 
     def copy_committed_history_from(
-        self, other: MinWMCausalSelfAttentionKVCache
+        self, other: ZingCausalSelfAttentionKVCache
     ) -> None:
         """Copy positive-branch self history while preserving cross KV elsewhere."""
         if self.rope_position_mode != other.rope_position_mode:
-            raise ValueError("MinWM CFG cache policy mismatch")
+            raise ValueError("Zing CFG cache policy mismatch")
         other_global_end, other_local_end = other._read_indices()
         self._grow_to_fit(other_local_end)
         self.k[:, :other_local_end].copy_(other.k[:, :other_local_end])

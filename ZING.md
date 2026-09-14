@@ -62,9 +62,8 @@ SGLang loading. Tensor values are unchanged; the file layout and loading
 metadata differ. `zing_conversion_manifest.json` records the public source and
 tensor summary without private filesystem paths.
 
-Public model and pipeline names use `Zing`. A few `MinWM` identifiers remain
-inside the implementation and as compatibility aliases because Zing evolved
-from minWM; users do not need to reference them.
+Model and pipeline identifiers consistently use `Zing` throughout the
+implementation.
 
 ## Launch
 
@@ -152,5 +151,5 @@ HTTP server.
 ## License and provenance
 
 The fork is Apache-2.0. See [THIRD_PARTY_NOTICES_ZING.md](THIRD_PARTY_NOTICES_ZING.md)
-for Zing, minWM, Wan, and optional dependency provenance. Model weights remain
+for Zing, Wan, and optional dependency provenance. Model weights remain
 subject to the license and notices published with their model repository.

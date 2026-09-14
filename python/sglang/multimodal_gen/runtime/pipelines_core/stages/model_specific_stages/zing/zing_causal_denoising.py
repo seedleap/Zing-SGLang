@@ -1,5 +1,5 @@
 # Copyright 2026 Seedleap.ai
-# Adapted from the Apache-2.0 minWM inference implementation.
+# Adapted from the Apache-2.0 Zing inference implementation.
 # SPDX-License-Identifier: Apache-2.0
 """Realtime reference, action, and cache scheduling for Zing-0.5."""
 
@@ -15,18 +15,18 @@ from typing import Any
 import torch
 
 from sglang.multimodal_gen.configs.pipeline_configs.zing import (
-    MINWM_ACTION_LABELS_CONDITION,
-    MINWM_ACTION_WEIGHTS_CONDITION,
-    MINWM_CHUNK_SEED_CONDITION,
-    MINWM_CHUNK_SEED_PREFIX_FRAMES_CONDITION,
-    MINWM_CONDITION_SWITCH_CONDITION,
-    MINWM_PROMPT_UPDATED_CONDITION,
-    MINWM_TOTAL_CHUNKS_CONDITION,
-    MINWM_TOTAL_LATENT_FRAMES_CONDITION,
+    ZING_ACTION_LABELS_CONDITION,
+    ZING_ACTION_WEIGHTS_CONDITION,
+    ZING_CHUNK_SEED_CONDITION,
+    ZING_CHUNK_SEED_PREFIX_FRAMES_CONDITION,
+    ZING_CONDITION_SWITCH_CONDITION,
+    ZING_PROMPT_UPDATED_CONDITION,
+    ZING_TOTAL_CHUNKS_CONDITION,
+    ZING_TOTAL_LATENT_FRAMES_CONDITION,
 )
 from sglang.multimodal_gen.configs.zing_resolution_buckets import (
-    MINWM_RESOLUTION_BUCKETS,
-    normalize_minwm_resolution_buckets,
+    ZING_RESOLUTION_BUCKETS,
+    normalize_zing_resolution_buckets,
 )
 from sglang.multimodal_gen.runtime.distributed import (
     get_local_torch_device,
@@ -39,15 +39,15 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
 )
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.models.dits.zing import (
-    set_minwm_cuda_graph_active,
+    set_zing_cuda_graph_active,
 )
 from sglang.multimodal_gen.runtime.models.dits.zing_action import (
     validate_action_labels,
     validate_action_weights,
 )
 from sglang.multimodal_gen.runtime.models.dits.zing_kv_cache import (
-    MinWMCausalAttentionKVPlan,
-    MinWMCausalSelfAttentionKVCache,
+    ZingCausalAttentionKVPlan,
+    ZingCausalSelfAttentionKVCache,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
@@ -81,13 +81,11 @@ from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.nvtx_pytorch_hooks import maybe_nvtx_range
 
-MINWM_ACTION_HISTORY_CACHE = "minwm_action_history"
-MINWM_INITIAL_NOISE_CACHE = "minwm_initial_noise"
-MINWM_INITIAL_NOISE_CURSOR_CACHE = "minwm_initial_noise_cursor"
-MINWM_T2V_FIRST_LATENT_CACHE = "minwm_t2v_first_latent"
-MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE = (
-    "minwm_action_residual_prepare_once_per_chunk"
-)
+ZING_ACTION_HISTORY_CACHE = "zing_action_history"
+ZING_INITIAL_NOISE_CACHE = "zing_initial_noise"
+ZING_INITIAL_NOISE_CURSOR_CACHE = "zing_initial_noise_cursor"
+ZING_T2V_FIRST_LATENT_CACHE = "zing_t2v_first_latent"
+ZING_ACTION_RESIDUAL_PREPARE_NVTX_RANGE = "zing_action_residual_prepare_once_per_chunk"
 logger = init_logger(__name__)
 
 
@@ -106,7 +104,7 @@ def _cuda_graph_tensor_signature(value: torch.Tensor) -> tuple:
     return (value.shape, value.stride(), value.dtype, value.device)
 
 
-_MINWM_CUDA_GRAPH_PLAN_INPUTS = (
+_ZING_CUDA_GRAPH_PLAN_INPUTS = (
     "key_position_ids",
     "query_position_ids",
     "key_cos",
@@ -117,7 +115,7 @@ _MINWM_CUDA_GRAPH_PLAN_INPUTS = (
 
 
 def _cuda_graph_attention_plan_signature(
-    plan: MinWMCausalAttentionKVPlan,
+    plan: ZingCausalAttentionKVPlan,
 ) -> tuple:
     return tuple(
         (
@@ -128,12 +126,12 @@ def _cuda_graph_attention_plan_signature(
                 else _cuda_graph_tensor_signature(value)
             ),
         )
-        for name in _MINWM_CUDA_GRAPH_PLAN_INPUTS
+        for name in _ZING_CUDA_GRAPH_PLAN_INPUTS
     )
 
 
-class _MinWMCudaGraphRunner:
-    """One full-DiT graph bound to a saturated MinWM session cache."""
+class _ZingCudaGraphRunner:
+    """One full-DiT graph bound to a saturated Zing session cache."""
 
     def __init__(self, key: tuple) -> None:
         self.key = key
@@ -162,27 +160,27 @@ class _MinWMCudaGraphRunner:
         self.static_action_token_residual.copy_(action_token_residual)
 
     def _copy_attention_plan_inputs(
-        self, attention_plan: MinWMCausalAttentionKVPlan
+        self, attention_plan: ZingCausalAttentionKVPlan
     ) -> None:
         if attention_plan is self._last_attention_plan_source:
             return
         static_plan = self.capture_dependencies
         if static_plan is None:
-            raise RuntimeError("MinWM CUDA graph has no captured attention plan")
-        for name in _MINWM_CUDA_GRAPH_PLAN_INPUTS:
+            raise RuntimeError("Zing CUDA graph has no captured attention plan")
+        for name in _ZING_CUDA_GRAPH_PLAN_INPUTS:
             target = getattr(static_plan, name)
             source = getattr(attention_plan, name)
             if target is None or source is None:
                 if target is not source:
                     raise RuntimeError(
-                        f"MinWM CUDA graph attention-plan input {name} changed"
+                        f"Zing CUDA graph attention-plan input {name} changed"
                     )
                 continue
             if _cuda_graph_tensor_signature(target) != _cuda_graph_tensor_signature(
                 source
             ):
                 raise RuntimeError(
-                    f"MinWM CUDA graph attention-plan input {name} changed shape"
+                    f"Zing CUDA graph attention-plan input {name} changed shape"
                 )
             if target.data_ptr() != source.data_ptr():
                 target.copy_(source)
@@ -195,7 +193,7 @@ class _MinWMCudaGraphRunner:
         prompt: torch.Tensor,
         timestep: torch.Tensor,
         action_token_residual: torch.Tensor,
-        attention_plan: MinWMCausalAttentionKVPlan,
+        attention_plan: ZingCausalAttentionKVPlan,
         capture_forward: (
             Callable[
                 [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
@@ -213,7 +211,7 @@ class _MinWMCudaGraphRunner:
             self.replay_count += 1
             if self.replay_count == 1 or self.replay_count % 100 == 0:
                 logger.info(
-                    "MinWM CUDA graph replay rank=%d count=%d",
+                    "Zing CUDA graph replay rank=%d count=%d",
                     get_sp_parallel_rank(),
                     self.replay_count,
                 )
@@ -257,7 +255,7 @@ class _MinWMCudaGraphRunner:
         self.graph.replay()
         self._last_attention_plan_source = self.capture_dependencies
         logger.info(
-            "Captured MinWM saturated recompute CUDA graph rank=%d",
+            "Captured Zing saturated recompute CUDA graph rank=%d",
             get_sp_parallel_rank(),
         )
         return self.output
@@ -265,7 +263,7 @@ class _MinWMCudaGraphRunner:
 
 def _parity_dump(name: str, value) -> None:
     """Persist opt-in tensors used to localize baseline/API parity drift."""
-    dump_dir = os.environ.get("MINWM_PARITY_DUMP_DIR")
+    dump_dir = os.environ.get("ZING_PARITY_DUMP_DIR")
     if not dump_dir:
         return
     path = (
@@ -286,8 +284,8 @@ def _parity_dump(name: str, value) -> None:
     torch.save(value, path)
 
 
-class MinWMChunkLatentPreparationStage(PipelineStage):
-    """Draw BFCHW noise before permuting, matching minWM's RNG fill order."""
+class ZingChunkLatentPreparationStage(PipelineStage):
+    """Draw BFCHW noise before permuting, matching Zing's RNG fill order."""
 
     def __init__(self, transformer) -> None:
         super().__init__()
@@ -313,7 +311,7 @@ class MinWMChunkLatentPreparationStage(PipelineStage):
                 server_args.pipeline_config.vae_config.arch_config.scale_factor_spatial
             )
             if batch.height is None or batch.width is None:
-                raise ValueError("MinWM T2V requires height and width")
+                raise ValueError("Zing T2V requires height and width")
             batch_size = int(batch.batch_size)
             latent_height = int(batch.height) // spatial_factor
             latent_width = int(batch.width) // spatial_factor
@@ -325,13 +323,13 @@ class MinWMChunkLatentPreparationStage(PipelineStage):
         )
         noise_bfchw = None
         condition_inputs = batch.condition_inputs or {}
-        chunk_seed = condition_inputs.get(MINWM_CHUNK_SEED_CONDITION)
+        chunk_seed = condition_inputs.get(ZING_CHUNK_SEED_CONDITION)
         if chunk_seed is not None:
             prefix_frames = int(
-                condition_inputs.get(MINWM_CHUNK_SEED_PREFIX_FRAMES_CONDITION, 0)
+                condition_inputs.get(ZING_CHUNK_SEED_PREFIX_FRAMES_CONDITION, 0)
             )
             if prefix_frames < 0:
-                raise ValueError("MinWM chunk seed prefix frames must be non-negative")
+                raise ValueError("Zing chunk seed prefix frames must be non-negative")
             chunk_generator = torch.Generator(device=get_local_torch_device())
             chunk_generator.manual_seed(int(chunk_seed))
             replay_noise_bfchw = torch.randn(
@@ -343,13 +341,13 @@ class MinWMChunkLatentPreparationStage(PipelineStage):
             noise_bfchw = replay_noise_bfchw[:, prefix_frames:]
         if batch.session is not None:
             state = get_realtime_causal_dit_state(batch.session)
-            total_chunks = condition_inputs.get(MINWM_TOTAL_CHUNKS_CONDITION)
+            total_chunks = condition_inputs.get(ZING_TOTAL_CHUNKS_CONDITION)
             total_latent_frames = condition_inputs.get(
-                MINWM_TOTAL_LATENT_FRAMES_CONDITION
+                ZING_TOTAL_LATENT_FRAMES_CONDITION
             )
             if batch.block_idx == 0 and chunk_seed is None:
                 if total_chunks is not None and int(total_chunks) < 1:
-                    raise ValueError("MinWM total chunk count must be positive")
+                    raise ValueError("Zing total chunk count must be positive")
                 if total_latent_frames is not None:
                     generated_frames = int(total_latent_frames)
                 elif condition is None:
@@ -373,25 +371,23 @@ class MinWMChunkLatentPreparationStage(PipelineStage):
                     device=get_local_torch_device(),
                     dtype=latent_dtype,
                 )
-                state.runtime_cache[MINWM_INITIAL_NOISE_CACHE] = full_noise[
+                state.runtime_cache[ZING_INITIAL_NOISE_CACHE] = full_noise[
                     :, reference_slots:
                 ]
-                state.runtime_cache[MINWM_INITIAL_NOISE_CURSOR_CACHE] = 0
+                state.runtime_cache[ZING_INITIAL_NOISE_CURSOR_CACHE] = 0
                 if condition is not None:
                     _parity_dump("image_latent.pt", condition)
                 _parity_dump("initial_noise_bfchw.pt", full_noise)
-            cached_noise = state.runtime_cache.get(MINWM_INITIAL_NOISE_CACHE)
+            cached_noise = state.runtime_cache.get(ZING_INITIAL_NOISE_CACHE)
             if noise_bfchw is None and cached_noise is not None:
-                start = int(
-                    state.runtime_cache.get(MINWM_INITIAL_NOISE_CURSOR_CACHE, 0)
-                )
+                start = int(state.runtime_cache.get(ZING_INITIAL_NOISE_CURSOR_CACHE, 0))
                 end = start + chunk_size
                 if end <= cached_noise.shape[1]:
                     noise_bfchw = cached_noise[:, start:end]
-                    state.runtime_cache[MINWM_INITIAL_NOISE_CURSOR_CACHE] = end
+                    state.runtime_cache[ZING_INITIAL_NOISE_CURSOR_CACHE] = end
                 elif total_chunks is not None or total_latent_frames is not None:
                     raise ValueError(
-                        "MinWM realtime request exceeded its pre-sampled noise horizon"
+                        "Zing realtime request exceeded its pre-sampled noise horizon"
                     )
         if noise_bfchw is None:
             noise_bfchw = torch.randn(
@@ -414,13 +410,13 @@ class MinWMChunkLatentPreparationStage(PipelineStage):
         return result
 
 
-class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
+class ZingCausalDMDDenoisingStage(CausalDMDDenoisingStage):
     """One clean reference commit followed by four-frame action DMD chunks."""
 
     def __init__(self, transformer, scheduler) -> None:
         super().__init__(transformer, scheduler)
-        self._minwm_cuda_graph_enabled = False
-        self._minwm_cuda_graph_runner: _MinWMCudaGraphRunner | None = None
+        self._zing_cuda_graph_enabled = False
+        self._zing_cuda_graph_runner: _ZingCudaGraphRunner | None = None
         self._realtime_kv_cache_pool: RealtimeKVCachePool | None = None
         self._realtime_kv_cache_pool_policies: dict[str, CausalDMDCachePolicy] = {}
         self._realtime_kv_cache_pool_shapes: dict[str, tuple[int, int, int]] = {}
@@ -453,10 +449,10 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             return
         if configured_buckets is None:
             raise ValueError(
-                "MinWM realtime KV cache pool requires symbolic resolution "
+                "Zing realtime KV cache pool requires symbolic resolution "
                 "buckets selected by the launch profile"
             )
-        bucket_names = normalize_minwm_resolution_buckets(str(configured_buckets))
+        bucket_names = normalize_zing_resolution_buckets(str(configured_buckets))
         pool_size = int(configured_pool_size)
         if pool_size <= 0:
             raise ValueError(
@@ -465,7 +461,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         admitted_sessions = int(server_args.realtime_max_sessions_per_worker)
         if pool_size < admitted_sessions:
             raise ValueError(
-                "MinWM realtime KV cache pool must cover every admitted worker "
+                "Zing realtime KV cache pool must cover every admitted worker "
                 f"session: pool_size={pool_size} "
                 f"realtime_max_sessions_per_worker={admitted_sessions}"
             )
@@ -479,7 +475,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         )
         if configured_window is None and int(self.local_attn_size) == -1:
             raise ValueError(
-                "MinWM realtime KV cache pool requires a bounded cache window. "
+                "Zing realtime KV cache pool requires a bounded cache window. "
                 "Set realtime_causal_kv_cache_num_frames."
             )
 
@@ -494,8 +490,8 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 raise ValueError("realtime_causal_sink_size must be non-negative")
             self.sink_size = int(configured_sink)
 
-        self._minwm_unbounded_cache = False
-        self._minwm_cuda_graph_enabled = bool(
+        self._zing_unbounded_cache = False
+        self._zing_cuda_graph_enabled = bool(
             getattr(server_args, "enable_cuda_graph", False)
         )
 
@@ -521,10 +517,10 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         bucket_shapes: dict[str, tuple[int, int, int]] = {}
         bucket_log_details: list[dict[str, Any]] = []
         for bucket_name in bucket_names:
-            output_width, output_height = MINWM_RESOLUTION_BUCKETS[bucket_name]
+            output_width, output_height = ZING_RESOLUTION_BUCKETS[bucket_name]
             if output_height % spatial_factor or output_width % spatial_factor:
                 raise ValueError(
-                    "MinWM realtime KV cache pool resolution must be divisible by "
+                    "Zing realtime KV cache pool resolution must be divisible by "
                     f"VAE spatial factor {spatial_factor}: bucket={bucket_name} "
                     f"height={output_height} width={output_width}"
                 )
@@ -532,7 +528,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             latent_width = output_width // spatial_factor
             if latent_height % patch_height or latent_width % patch_width:
                 raise ValueError(
-                    "MinWM realtime KV cache pool latent resolution must be "
+                    "Zing realtime KV cache pool latent resolution must be "
                     f"divisible by DiT patch size {patch_height}x{patch_width}: "
                     f"bucket={bucket_name} latent_height={latent_height} "
                     f"latent_width={latent_width}"
@@ -588,9 +584,9 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 kv_cache_kwargs=max_policy.kv_cache_kwargs,
             )
             for layer, cache_block in enumerate(kv_cache):
-                if not isinstance(cache_block, MinWMCausalSelfAttentionKVCache):
+                if not isinstance(cache_block, ZingCausalSelfAttentionKVCache):
                     raise TypeError(
-                        "MinWM startup KV cache pool created an unexpected cache "
+                        "Zing startup KV cache pool created an unexpected cache "
                         f"type at slot {slot_id}, layer {layer}: "
                         f"{type(cache_block).__name__}"
                     )
@@ -619,9 +615,9 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         sequence_shard_enabled: bool,
     ) -> None:
         """Emit the per-rank readiness record after every allocation is complete."""
-        max_output_width, max_output_height = MINWM_RESOLUTION_BUCKETS[max_bucket_name]
+        max_output_width, max_output_height = ZING_RESOLUTION_BUCKETS[max_bucket_name]
         logger.info(
-            "MINWM_KV_CACHE_POOL_READY_JSON %s",
+            "ZING_KV_CACHE_POOL_READY_JSON %s",
             json.dumps(
                 {
                     "allocated_bytes": allocated_cache_bytes(slots),
@@ -722,12 +718,12 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         ulysses_world_size = get_ulysses_parallel_world_size()
         if get_ring_parallel_world_size() > 1:
             raise NotImplementedError(
-                "MinWM causal sequence sharding supports Ulysses with "
+                "Zing causal sequence sharding supports Ulysses with "
                 "ring_degree = 1 only."
             )
         if ulysses_world_size <= 1:
             raise ValueError(
-                "MinWM causal sequence sharding requires ulysses_degree > 1."
+                "Zing causal sequence sharding requires ulysses_degree > 1."
             )
         if num_attention_heads % ulysses_world_size != 0:
             raise ValueError(
@@ -751,21 +747,21 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             )
         super()._apply_causal_cache_overrides(batch, server_args)
         arch_config = self.transformer.config
-        self._minwm_unbounded_cache = (
+        self._zing_unbounded_cache = (
             explicit_window is None and int(arch_config.local_attn_size) == -1
         )
-        if not self._minwm_unbounded_cache:
+        if not self._zing_unbounded_cache:
             return
-        total_chunks = (batch.condition_inputs or {}).get(MINWM_TOTAL_CHUNKS_CONDITION)
+        total_chunks = (batch.condition_inputs or {}).get(ZING_TOTAL_CHUNKS_CONDITION)
         total_latent_frames = (batch.condition_inputs or {}).get(
-            MINWM_TOTAL_LATENT_FRAMES_CONDITION
+            ZING_TOTAL_LATENT_FRAMES_CONDITION
         )
         if total_latent_frames is not None:
             self.sliding_window_num_frames = int(total_latent_frames) + int(
                 batch.image_latent is not None
             )
         elif total_chunks is not None:
-            # minWM main uses local_attn_size=-1: retain the reference and every
+            # Zing main uses local_attn_size=-1: retain the reference and every
             # generated latent. A bounded realtime request can allocate that
             # complete horizon once instead of treating 128 as a sliding window.
             if batch.image_latent is not None:
@@ -793,7 +789,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         cache_kwargs = {
             "sequence_shard_enabled": policy.sequence_shard_enabled,
             "kv_cache_size": policy.expected_cache_tokens,
-            "allow_growth": bool(getattr(self, "_minwm_unbounded_cache", True)),
+            "allow_growth": bool(getattr(self, "_zing_unbounded_cache", True)),
             "rope_position_mode": str(
                 getattr(arch_config, "rope_position_mode", "absolute")
             ),
@@ -808,15 +804,15 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 getattr(arch_config, "scene_cut_sink_enabled", False)
             ),
         }
-        if getattr(self, "_minwm_cuda_graph_enabled", False):
+        if getattr(self, "_zing_cuda_graph_enabled", False):
             if cache_kwargs["allow_growth"]:
                 raise ValueError(
-                    "MinWM CUDA graph requires a bounded realtime KV window. "
+                    "Zing CUDA graph requires a bounded realtime KV window. "
                     "Set realtime_causal_kv_cache_num_frames on the request or model."
                 )
             if cache_kwargs["rope_position_mode"] != "block_relative":
                 raise ValueError(
-                    "MinWM CUDA graph currently requires block_relative RoPE so "
+                    "Zing CUDA graph currently requires block_relative RoPE so "
                     "one saturated graph remains valid across chunks."
                 )
         return cache_kwargs
@@ -851,7 +847,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         sink_tokens = self._get_causal_sink_tokens()
         attention_window_size = self._get_causal_attention_window_size(kv_cache_size)
         self.causal_kv_cache = [
-            MinWMCausalSelfAttentionKVCache(
+            ZingCausalSelfAttentionKVCache(
                 k=torch.zeros(
                     (
                         batch_size,
@@ -895,7 +891,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         sequence_shard_enabled: bool,
     ) -> bool:
         del sequence_shard_enabled
-        # MinWM cache selection runs eagerly even on the single-GPU path. Keep
+        # Zing cache selection runs eagerly even on the single-GPU path. Keep
         # host cursors authoritative so reading 30 layer cursors never forces a
         # device-to-host synchronization.
         return True
@@ -925,7 +921,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             or crossattn_cache is None
             or len(causal_kv_cache) != self.num_transformer_blocks
             or len(crossattn_cache) != self.num_transformer_blocks
-            or not isinstance(first_cache, MinWMCausalSelfAttentionKVCache)
+            or not isinstance(first_cache, ZingCausalSelfAttentionKVCache)
             or first_cache.k.shape[1] < policy.expected_cache_tokens
             or first_cache.k.shape[2] != policy.num_attention_heads
             or first_cache.sink_tokens != policy.expected_sink_tokens
@@ -948,7 +944,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         timestep: torch.Tensor,
         scheduler,
     ) -> torch.Tensor:
-        # minWM's FewStepRenoiseScheduler calls pred_x0_from_flow with its
+        # Zing's FewStepRenoiseScheduler calls pred_x0_from_flow with its
         # default compute_dtype=torch.float32. Preserve that arithmetic instead
         # of the generic causal path's fp64 stabilization.
         original_dtype = noisy_latent.dtype
@@ -976,7 +972,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
 
     def _get_causal_dmd_scheduler(self, batch: Req, server_args: ServerArgs):
         if batch.scheduler is None:
-            raise ValueError("MinWM requires DMDTimestepPreparationStage")
+            raise ValueError("Zing requires DMDTimestepPreparationStage")
         return batch.scheduler
 
     def _prepare_causal_dmd_timesteps(
@@ -987,7 +983,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         device: torch.device,
     ) -> torch.Tensor:
         if batch.timesteps is None:
-            raise ValueError("MinWM requires prepared DMD timesteps")
+            raise ValueError("Zing requires prepared DMD timesteps")
         return batch.timesteps.to(device)
 
     @staticmethod
@@ -1010,16 +1006,16 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         target_dtype: torch.dtype,
     ) -> torch.Tensor:
         if len(batch.prompt_embeds) != 1:
-            raise ValueError("MinWM realtime inference supports one text encoder")
+            raise ValueError("Zing realtime inference supports one text encoder")
         prompt = batch.prompt_embeds[0]
         if prompt.shape[0] != 1:
-            raise ValueError("MinWM realtime inference currently requires batch size 1")
+            raise ValueError("Zing realtime inference currently requires batch size 1")
         seq_len = self._prompt_seq_len(batch, prompt)
         return prompt[:, :seq_len].to(dtype=target_dtype)
 
     def _action_cache_state(self, batch: Req):
         if batch.session is None:
-            raise ValueError("MinWM realtime inference requires a session")
+            raise ValueError("Zing realtime inference requires a session")
         return get_realtime_causal_dit_state(batch.session)
 
     def _prepare_causal_dmd_pos_cond_kwargs(
@@ -1031,7 +1027,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         del target_dtype
         state = self._action_cache_state(batch)
         condition_inputs = batch.condition_inputs or {}
-        weight_windows = condition_inputs.get(MINWM_ACTION_WEIGHTS_CONDITION)
+        weight_windows = condition_inputs.get(ZING_ACTION_WEIGHTS_CONDITION)
         if batch.block_idx == 0:
             # Native V3 starts T2V with a cold action cache: the first action
             # convolution sees only the current first block. I2V has one
@@ -1054,10 +1050,10 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                     dtype=torch.float32,
                     device=batch.latents.device,
                 )
-            state.runtime_cache[MINWM_ACTION_HISTORY_CACHE] = history
-        history = state.runtime_cache.get(MINWM_ACTION_HISTORY_CACHE)
+            state.runtime_cache[ZING_ACTION_HISTORY_CACHE] = history
+        history = state.runtime_cache.get(ZING_ACTION_HISTORY_CACHE)
         if history is None:
-            raise ValueError("MinWM action history is missing for a continued session")
+            raise ValueError("Zing action history is missing for a continued session")
         history_frames = int(self.transformer.config.action_history_frames)
 
         if weight_windows is not None:
@@ -1070,13 +1066,13 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 or len(weight_windows) != expected_frames
             ):
                 raise ValueError(
-                    f"expected {expected_frames} MinWM latent action windows"
+                    f"expected {expected_frames} Zing latent action windows"
                 )
             flat_rows = []
             for window in weight_windows:
                 if not isinstance(window, list) or len(window) != temporal_factor:
                     raise ValueError(
-                        f"each MinWM action window must contain {temporal_factor} rows"
+                        f"each Zing action window must contain {temporal_factor} rows"
                     )
                 flat_rows.extend(window)
             flat_rows = validate_action_weights(
@@ -1086,11 +1082,11 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 flat_rows, dtype=torch.float32, device=batch.latents.device
             ).reshape(1, expected_frames, temporal_factor, 8)
             if history.ndim != 4:
-                raise ValueError("MinWM action form cannot change within a session")
+                raise ValueError("Zing action form cannot change within a session")
             action_window = torch.cat([history[:, -history_frames:], current], dim=1)
             return {"action": action_window}
 
-        labels = condition_inputs.get(MINWM_ACTION_LABELS_CONDITION)
+        labels = condition_inputs.get(ZING_ACTION_LABELS_CONDITION)
         if labels is None:
             labels = [0] * int(batch.latents.shape[2])
         labels = validate_action_labels(
@@ -1100,7 +1096,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             labels, dtype=torch.long, device=batch.latents.device
         ).unsqueeze(0)
         if history.ndim != 2:
-            raise ValueError("MinWM action form cannot change within a session")
+            raise ValueError("Zing action form cannot change within a session")
         action_window = torch.cat([history[:, -history_frames:], current], dim=1)
         return {"action": action_window}
 
@@ -1131,7 +1127,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             "sink_tokens": int(expected_sink_tokens),
             "attention_window_tokens": int(expected_attention_window_tokens),
             "attention_heads": int(expected_attention_heads),
-            "allow_growth": bool(self._minwm_unbounded_cache),
+            "allow_growth": bool(self._zing_unbounded_cache),
             "rope_position_mode": str(
                 getattr(arch_config, "rope_position_mode", "absolute")
             ),
@@ -1236,7 +1232,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         if caches:
             cache = caches[0]
             logger.info(
-                "MINWM_RUNTIME_ALIGNMENT local_attn_size=%d sink_size=%d "
+                "ZING_RUNTIME_ALIGNMENT local_attn_size=%d sink_size=%d "
                 "window_size=%d rope_position_mode=%s rope_gap=%d "
                 "prompt_first_frame_pin_enabled=%s request_sink_size=%s "
                 "request_window_size=%s allow_growth=%s cache_tokens=%d "
@@ -1257,7 +1253,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 bool(cache.scene_cut_sink_enabled),
             )
         logger.info(
-            "MINWM_RUNTIME_ALIGNMENT_JSON %s",
+            "ZING_RUNTIME_ALIGNMENT_JSON %s",
             json.dumps(alignment, sort_keys=True, separators=(",", ":")),
         )
         if violations:
@@ -1268,7 +1264,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 else f"layer {first['layer']}"
             )
             raise RuntimeError(
-                "MinWM runtime alignment mismatch at "
+                "Zing runtime alignment mismatch at "
                 f"{location}: {first['field']} expected={first['expected']!r} "
                 f"actual={first['actual']!r}"
             )
@@ -1276,13 +1272,13 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
 
     @staticmethod
     def _configure_startup_pool_cache_for_policy(
-        kv_cache: list[MinWMCausalSelfAttentionKVCache],
+        kv_cache: list[ZingCausalSelfAttentionKVCache],
         policy: CausalDMDCachePolicy,
     ) -> None:
         """Apply one bucket's logical bounds to a max-sized physical slot."""
 
         if policy.kv_cache_kwargs.get("allow_growth", False):
-            raise ValueError("MinWM startup KV cache pool does not support growth")
+            raise ValueError("Zing startup KV cache pool does not support growth")
         for layer, cache_block in enumerate(kv_cache):
             k_capacity = int(cache_block.k.shape[1])
             v_capacity = int(cache_block.v.shape[1])
@@ -1291,7 +1287,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 or v_capacity < policy.expected_cache_tokens
             ):
                 raise RuntimeError(
-                    "MinWM startup KV cache pool slot is smaller than the selected "
+                    "Zing startup KV cache pool slot is smaller than the selected "
                     f"resolution bucket at layer {layer}: "
                     f"required={policy.expected_cache_tokens} "
                     f"k_capacity={k_capacity} v_capacity={v_capacity}"
@@ -1315,13 +1311,13 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 {
                     "bucket": name,
                     "latent_shape": self._realtime_kv_cache_pool_shapes[name],
-                    "output_height": MINWM_RESOLUTION_BUCKETS[name][1],
-                    "output_width": MINWM_RESOLUTION_BUCKETS[name][0],
+                    "output_height": ZING_RESOLUTION_BUCKETS[name][1],
+                    "output_width": ZING_RESOLUTION_BUCKETS[name][0],
                 }
                 for name in self._realtime_kv_cache_pool_policies
             ]
             raise ValueError(
-                "MinWM request resolution is not enabled by the launch profile; "
+                "Zing request resolution is not enabled by the launch profile; "
                 f"actual_latent_shape={actual_shape} supported={supported}"
             )
 
@@ -1348,7 +1344,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 )
         if mismatch_fields:
             raise ValueError(
-                "MinWM request does not match the startup KV cache pool; "
+                "Zing request does not match the startup KV cache pool; "
                 "per-request allocation is disabled for pooled realtime "
                 "sessions: " + "; ".join(mismatch_fields)
             )
@@ -1367,7 +1363,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         acquired = lease is None
         if acquired:
             with maybe_nvtx_range(
-                "minwm_realtime_kv_cache_pool_acquire",
+                "zing_realtime_kv_cache_pool_acquire",
                 bool(getattr(self, "_current_use_nvtx", False)),
             ):
                 lease = pool.acquire(bucket_key=bucket_name)
@@ -1381,7 +1377,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             cache_state.crossattn_cache = lease.crossattn_cache
         elif lease.bucket_key != bucket_name:
             raise ValueError(
-                "MinWM resolution cannot change within a realtime session: "
+                "Zing resolution cannot change within a realtime session: "
                 f"initial_bucket={lease.bucket_key} requested_bucket={bucket_name}"
             )
 
@@ -1390,7 +1386,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             or cache_state.crossattn_cache is not lease.crossattn_cache
         ):
             raise RuntimeError(
-                "MinWM realtime session cache references do not match its "
+                "Zing realtime session cache references do not match its "
                 "startup pool lease"
             )
         return lease, acquired
@@ -1402,7 +1398,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
     ) -> None:
         """Reset logical cursors while preserving the slot's resident tensors."""
         with maybe_nvtx_range(
-            "minwm_realtime_kv_cache_pool_reset",
+            "zing_realtime_kv_cache_pool_reset",
             bool(getattr(self, "_current_use_nvtx", False)),
         ):
             # Cursor reset makes stale K/V unreachable. The large backing
@@ -1422,7 +1418,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
     ) -> CausalDMDRealtimeCacheContext:
         pool = self._realtime_kv_cache_pool
         if pool is None:
-            raise RuntimeError("MinWM realtime KV cache pool is not initialized")
+            raise RuntimeError("Zing realtime KV cache pool is not initialized")
 
         bucket_name, policy = self._validate_startup_pool_request_policy(
             batch, server_args, ctx
@@ -1462,13 +1458,13 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             )
         if batch.block_idx == 0:
             self._log_runtime_alignment_once(batch, cache_ctx)
-        if (batch.condition_inputs or {}).get(MINWM_PROMPT_UPDATED_CONDITION):
+        if (batch.condition_inputs or {}).get(ZING_PROMPT_UPDATED_CONDITION):
             self._reset_crossattn_cache(cache_ctx.crossattn_cache)
             condition_switch = (batch.condition_inputs or {}).get(
-                MINWM_CONDITION_SWITCH_CONDITION, "prompt"
+                ZING_CONDITION_SWITCH_CONDITION, "prompt"
             )
             if condition_switch not in {"prompt", "scene_cut"}:
-                raise ValueError("MinWM condition switch must be prompt or scene_cut")
+                raise ValueError("Zing condition switch must be prompt or scene_cut")
             for cache_block in cache_ctx.kv_cache:
                 if condition_switch == "scene_cut":
                     cache_block.mark_scene_cut()
@@ -1480,7 +1476,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 return cache_ctx
             if batch.image_latent.shape[2] != 1:
                 raise ValueError(
-                    "MinWM requires exactly one encoded reference latent on chunk zero"
+                    "Zing requires exactly one encoded reference latent on chunk zero"
                 )
             reference_kwargs = dict(ctx.pos_cond_kwargs)
             if reference_kwargs["action"].ndim == 4:
@@ -1521,10 +1517,10 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         pos_cond_kwargs: dict,
         num_frames: int,
     ) -> None:
-        history = cache_ctx.cache_state.runtime_cache[MINWM_ACTION_HISTORY_CACHE]
+        history = cache_ctx.cache_state.runtime_cache[ZING_ACTION_HISTORY_CACHE]
         current = pos_cond_kwargs["action"][:, -num_frames:]
         history_frames = int(self.transformer.config.action_history_frames)
-        cache_ctx.cache_state.runtime_cache[MINWM_ACTION_HISTORY_CACHE] = torch.cat(
+        cache_ctx.cache_state.runtime_cache[ZING_ACTION_HISTORY_CACHE] = torch.cat(
             [history, current], dim=1
         )[:, -history_frames:]
 
@@ -1535,7 +1531,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         """Materialize the action condition once for this forward context."""
         p_t, p_h, p_w = self.transformer.patch_size
         with maybe_nvtx_range(
-            MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE,
+            ZING_ACTION_RESIDUAL_PREPARE_NVTX_RANGE,
             bool(getattr(self, "_current_use_nvtx", False)),
         ):
             with torch.autocast(
@@ -1569,7 +1565,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         self._parity_forward_index = index + 1
         return output
 
-    def _minwm_cuda_graph_key(
+    def _zing_cuda_graph_key(
         self,
         *,
         latent_model_input: torch.Tensor,
@@ -1583,12 +1579,12 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         attn_metadata,
     ) -> tuple | None:
         if (
-            not getattr(self, "_minwm_cuda_graph_enabled", False)
+            not getattr(self, "_zing_cuda_graph_enabled", False)
             or current_timestep == 0
             or attn_metadata is not None
             or image_kwargs
             or set(pos_cond_kwargs) != {"action", "action_token_residual"}
-            or os.environ.get("MINWM_PARITY_DUMP_DIR")
+            or os.environ.get("ZING_PARITY_DUMP_DIR")
             or not latent_model_input.is_cuda
             or torch.version.hip is not None
         ):
@@ -1605,7 +1601,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             return None
 
         first_cache = kv_cache[0]
-        if not isinstance(first_cache, MinWMCausalSelfAttentionKVCache):
+        if not isinstance(first_cache, ZingCausalSelfAttentionKVCache):
             return None
         plan = first_cache.last_attention_plan
         if (
@@ -1673,7 +1669,7 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
     ) -> torch.Tensor:
         graph_key = None
         if not self._causal_sequence_shard_enabled(batch):
-            graph_key = self._minwm_cuda_graph_key(
+            graph_key = self._zing_cuda_graph_key(
                 latent_model_input=latent_model_input,
                 prompt_embeds=prompt_embeds,
                 timestep=timestep,
@@ -1710,15 +1706,15 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
                 )
 
             if (
-                self._minwm_cuda_graph_runner is None
-                or self._minwm_cuda_graph_runner.key != graph_key
+                self._zing_cuda_graph_runner is None
+                or self._zing_cuda_graph_runner.key != graph_key
             ):
-                self._minwm_cuda_graph_runner = _MinWMCudaGraphRunner(graph_key)
-            runner = self._minwm_cuda_graph_runner
+                self._zing_cuda_graph_runner = _ZingCudaGraphRunner(graph_key)
+            runner = self._zing_cuda_graph_runner
             action_token_residual = pos_cond_kwargs["action_token_residual"]
             attention_plan = kv_cache[0].last_attention_plan
-            if not isinstance(attention_plan, MinWMCausalAttentionKVPlan):
-                raise RuntimeError("MinWM CUDA graph requires an attention plan")
+            if not isinstance(attention_plan, ZingCausalAttentionKVPlan):
+                raise RuntimeError("Zing CUDA graph requires an attention plan")
 
             if runner.graph is None:
                 attention_plan = self.transformer.prepare_causal_attention_plan(
@@ -1781,15 +1777,15 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
             return self._forward_impl(batch, server_args)
 
     def _forward_impl(self, batch: Req, server_args: ServerArgs) -> Req:
-        self._minwm_cuda_graph_enabled = bool(
+        self._zing_cuda_graph_enabled = bool(
             getattr(server_args, "enable_cuda_graph", False)
         )
-        set_minwm_cuda_graph_active(self._minwm_cuda_graph_enabled)
-        if self._minwm_cuda_graph_enabled and bool(
+        set_zing_cuda_graph_active(self._zing_cuda_graph_enabled)
+        if self._zing_cuda_graph_enabled and bool(
             getattr(server_args, "enable_torch_compile", False)
         ):
             raise ValueError(
-                "MinWM CUDA graph cannot be combined with whole-DiT torch.compile."
+                "Zing CUDA graph cannot be combined with whole-DiT torch.compile."
             )
         if batch.block_idx == 0:
             self._parity_forward_index = 0
@@ -1831,8 +1827,8 @@ class MinWMCausalDMDDenoisingStage(CausalDMDDenoisingStage):
         return result
 
 
-class MinWMCausalUniPCDenoisingStage(MinWMCausalDMDDenoisingStage):
-    """Run minWM V3's per-chunk UniPC loop while retaining realtime KV state."""
+class ZingCausalUniPCDenoisingStage(ZingCausalDMDDenoisingStage):
+    """Run Zing V3's per-chunk UniPC loop while retaining realtime KV state."""
 
     def _denoise_causal_dmd_chunk(
         self,
@@ -1902,7 +1898,7 @@ class MinWMCausalUniPCDenoisingStage(MinWMCausalDMDDenoisingStage):
         return latents_btchw.permute(0, 2, 1, 3, 4), attn_metadata
 
 
-class MinWMCausalVaeDecodingStage(CausalVaeDecodingStage):
+class ZingCausalVaeDecodingStage(CausalVaeDecodingStage):
     """Seed residual Wan2.2 VAE state with the reference latent exactly once."""
 
     def _decode_wan_with_persistent_cache(
@@ -1911,7 +1907,7 @@ class MinWMCausalVaeDecodingStage(CausalVaeDecodingStage):
         *,
         first_chunk: bool,
     ) -> torch.Tensor:
-        # minWM's WanVAEWrapper converts the cached decoder result to FP32
+        # Zing's WanVAEWrapper converts the cached decoder result to FP32
         # before pixel-space scaling. Preserve that output boundary.
         return (
             super()
@@ -1928,7 +1924,7 @@ class MinWMCausalVaeDecodingStage(CausalVaeDecodingStage):
             get_realtime_causal_dit_state(session) if session is not None else None
         )
         if batch.block_idx == 0 and causal_state is not None:
-            causal_state.runtime_cache.pop(MINWM_T2V_FIRST_LATENT_CACHE, None)
+            causal_state.runtime_cache.pop(ZING_T2V_FIRST_LATENT_CACHE, None)
 
         if batch.block_idx == 0 and batch.image_latent is not None:
             batch.latents = torch.cat([batch.image_latent, generated_latents], dim=2)
@@ -1942,7 +1938,7 @@ class MinWMCausalVaeDecodingStage(CausalVaeDecodingStage):
             # values while its shortcut produces four. Preserve T2V's immediate
             # first-frame response, then use this latent to reseed the decoder
             # together with the first regular block below.
-            causal_state.runtime_cache[MINWM_T2V_FIRST_LATENT_CACHE] = (
+            causal_state.runtime_cache[ZING_T2V_FIRST_LATENT_CACHE] = (
                 generated_latents.detach().clone()
             )
         elif (
@@ -1951,7 +1947,7 @@ class MinWMCausalVaeDecodingStage(CausalVaeDecodingStage):
             and causal_state is not None
         ):
             first_latent = causal_state.runtime_cache.pop(
-                MINWM_T2V_FIRST_LATENT_CACHE, None
+                ZING_T2V_FIRST_LATENT_CACHE, None
             )
             if first_latent is not None:
                 batch.latents = torch.cat([first_latent, generated_latents], dim=2)

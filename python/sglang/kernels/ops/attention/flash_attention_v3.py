@@ -68,7 +68,7 @@ def _load_locked_fa3_kernel(lockfile_path: str):
 
 
 def _call_fa3_kernel(kernel, *args, out=None, only_qv=False, **kwargs):
-    # The kernels-community provider pinned by the unified MinWM image predates
+    # The kernels-community provider pinned by the unified Zing image predates
     # the optional ``only_qv`` and ``out`` keywords.  Do not pass defaults that
     # change no behavior; newer providers still receive non-default requests.
     if only_qv:

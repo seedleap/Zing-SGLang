@@ -1,5 +1,5 @@
 # Copyright 2026 Seedleap.ai
-# Adapted from the Apache-2.0 minWM and Wan implementations.
+# Adapted from the Apache-2.0 Zing and Wan implementations.
 # SPDX-License-Identifier: Apache-2.0
 """Pipeline config for the Zing-0.5 Wan2.2-5B causal DMD model."""
 
@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 
 from sglang.multimodal_gen.configs.models import DiTConfig, EncoderConfig, VAEConfig
-from sglang.multimodal_gen.configs.models.dits import MinWMVideoConfig
+from sglang.multimodal_gen.configs.models.dits import ZingVideoConfig
 from sglang.multimodal_gen.configs.models.encoders.t5 import T5ArchConfig, T5Config
 from sglang.multimodal_gen.configs.models.vaes.wanvae import (
     WanVAEArchConfig,
@@ -19,47 +19,47 @@ from sglang.multimodal_gen.configs.models.vaes.wanvae import (
 from sglang.multimodal_gen.configs.pipeline_configs.base import TextConditioningOutput
 from sglang.multimodal_gen.configs.pipeline_configs.wan import Wan2_2_TI2V_5B_Config
 
-MINWM_ACTION_LABELS_CONDITION = "minwm_action_labels"
-MINWM_ACTION_WEIGHTS_CONDITION = "minwm_action_weights"
-MINWM_CHUNK_SEED_CONDITION = "minwm_chunk_seed"
-MINWM_CHUNK_SEED_PREFIX_FRAMES_CONDITION = "minwm_chunk_seed_prefix_frames"
-MINWM_CHUNK_SEEDS_INPUT = "minwm_chunk_seeds"
-MINWM_CONDITION_SWITCH_CONDITION = "minwm_condition_switch"
-MINWM_PROMPT_SCHEDULE_INPUT = "minwm_prompt_schedule"
-MINWM_PROMPT_UPDATED_CONDITION = "minwm_prompt_updated"
-MINWM_TOTAL_CHUNKS_CONDITION = "minwm_total_chunks"
-MINWM_TOTAL_LATENT_FRAMES_CONDITION = "minwm_total_latent_frames"
-MINWM_VAE_LANES = ("parity", "parallel")
+ZING_ACTION_LABELS_CONDITION = "zing_action_labels"
+ZING_ACTION_WEIGHTS_CONDITION = "zing_action_weights"
+ZING_CHUNK_SEED_CONDITION = "zing_chunk_seed"
+ZING_CHUNK_SEED_PREFIX_FRAMES_CONDITION = "zing_chunk_seed_prefix_frames"
+ZING_CHUNK_SEEDS_INPUT = "zing_chunk_seeds"
+ZING_CONDITION_SWITCH_CONDITION = "zing_condition_switch"
+ZING_PROMPT_SCHEDULE_INPUT = "zing_prompt_schedule"
+ZING_PROMPT_UPDATED_CONDITION = "zing_prompt_updated"
+ZING_TOTAL_CHUNKS_CONDITION = "zing_total_chunks"
+ZING_TOTAL_LATENT_FRAMES_CONDITION = "zing_total_latent_frames"
+ZING_VAE_LANES = ("parity", "parallel")
 
 
-def _minwm_native_component_names() -> tuple[str, ...]:
-    vae_lane = os.environ.get("ZING_VAE_LANE") or os.environ.get("MINWM_VAE_LANE")
+def _zing_native_component_names() -> tuple[str, ...]:
+    vae_lane = os.environ.get("ZING_VAE_LANE")
     if vae_lane is not None:
-        if vae_lane not in MINWM_VAE_LANES:
+        if vae_lane not in ZING_VAE_LANES:
             raise ValueError(
-                f"ZING_VAE_LANE must be one of {MINWM_VAE_LANES}, got {vae_lane!r}"
+                f"ZING_VAE_LANE must be one of {ZING_VAE_LANES}, got {vae_lane!r}"
             )
-        # The explicit lane takes precedence over the legacy component list so
+        # The explicit lane takes precedence over the component list so
         # benchmark manifests cannot accidentally mix parity and speed modes.
         return ("text_encoder", "vae") if vae_lane == "parity" else ("text_encoder",)
 
-    value = os.environ.get("MINWM_NATIVE_COMPONENTS", "text_encoder,vae")
+    value = os.environ.get("ZING_NATIVE_COMPONENTS", "text_encoder,vae")
     names = tuple(name.strip() for name in value.split(",") if name.strip())
     unknown = set(names) - {"text_encoder", "vae"}
     if unknown:
-        raise ValueError(f"unknown MINWM_NATIVE_COMPONENTS entries: {sorted(unknown)}")
+        raise ValueError(f"unknown ZING_NATIVE_COMPONENTS entries: {sorted(unknown)}")
     return names
 
 
-def minwm_t5_postprocess_text(outputs, _text_inputs) -> TextConditioningOutput:
+def zing_t5_postprocess_text(outputs, _text_inputs) -> TextConditioningOutput:
     attention_mask = getattr(outputs, "attention_mask", None)
     if attention_mask is None:
         if _text_inputs is None or "attention_mask" not in _text_inputs:
-            raise ValueError("MinWM text encoding requires an attention mask")
+            raise ValueError("Zing text encoding requires an attention mask")
         attention_mask = _text_inputs["attention_mask"]
     token_mask = attention_mask.to(dtype=torch.bool)
     hidden_state = outputs.last_hidden_state.masked_fill(~token_mask.unsqueeze(-1), 0.0)
-    # Current minWM main keeps at least 512 positions in the packed text
+    # Current Zing main keeps at least 512 positions in the packed text
     # context. Positions after the true token length are explicit zero vectors,
     # but they still participate as K/V entries in cross attention. This is a
     # model contract, not ordinary attention-mask trimming.
@@ -67,7 +67,7 @@ def minwm_t5_postprocess_text(outputs, _text_inputs) -> TextConditioningOutput:
     positions = torch.arange(hidden_state.shape[1], device=hidden_state.device)
     context_mask = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
     if torch.isnan(hidden_state).any():
-        raise ValueError("MinWM text encoder produced NaN embeddings")
+        raise ValueError("Zing text encoder produced NaN embeddings")
     return TextConditioningOutput(
         prompt_embeds=hidden_state,
         prompt_embeds_mask=context_mask,
@@ -75,12 +75,12 @@ def minwm_t5_postprocess_text(outputs, _text_inputs) -> TextConditioningOutput:
     )
 
 
-def _minwm_t5_config() -> T5Config:
+def _zing_t5_config() -> T5Config:
     return T5Config(arch_config=T5ArchConfig(text_len=1024))
 
 
 @dataclass
-class MinWMWan22VAEArchConfig(WanVAEArchConfig):
+class ZingWan22VAEArchConfig(WanVAEArchConfig):
     base_dim: int = 160
     decoder_base_dim: int | None = 256
     z_dim: int = 48
@@ -193,31 +193,29 @@ class MinWMWan22VAEArchConfig(WanVAEArchConfig):
 
 
 @dataclass
-class MinWMWan22VAEConfig(WanVAEConfig):
-    arch_config: MinWMWan22VAEArchConfig = field(
-        default_factory=MinWMWan22VAEArchConfig
-    )
+class ZingWan22VAEConfig(WanVAEConfig):
+    arch_config: ZingWan22VAEArchConfig = field(default_factory=ZingWan22VAEArchConfig)
 
 
 @dataclass
-class MinWMCausalDMDConfig(Wan2_2_TI2V_5B_Config):
+class ZingCausalDMDConfig(Wan2_2_TI2V_5B_Config):
     """Exact structural/runtime defaults of the requested 5B DMD student."""
 
-    dit_config: DiTConfig = field(default_factory=MinWMVideoConfig)
-    vae_config: VAEConfig = field(default_factory=MinWMWan22VAEConfig)
+    dit_config: DiTConfig = field(default_factory=ZingVideoConfig)
+    vae_config: VAEConfig = field(default_factory=ZingWan22VAEConfig)
     text_encoder_configs: tuple[EncoderConfig, ...] = field(
-        default_factory=lambda: (_minwm_t5_config(),)
+        default_factory=lambda: (_zing_t5_config(),)
     )
     postprocess_text_funcs: tuple = field(
-        default_factory=lambda: (minwm_t5_postprocess_text,)
+        default_factory=lambda: (zing_t5_postprocess_text,)
     )
-    # minWM main uses diffusers.AutoencoderKLWan and the HF UMT5 encoder
+    # Zing main uses diffusers.AutoencoderKLWan and the HF UMT5 encoder
     # directly. Their tiny BF16 kernel differences are amplified by causal
     # rollout, so parity takes precedence over SGLang's optimized variants.
     native_component_names: tuple[str, ...] = field(
-        default_factory=_minwm_native_component_names
+        default_factory=_zing_native_component_names
     )
-    # minWM main executes BF16 modules directly.  An additional autocast scope
+    # Zing main executes BF16 modules directly.  An additional autocast scope
     # changes Wan VAE and DiT kernel promotion/rounding, then causal KV reuse
     # amplifies the first-step drift across chunks.
     enable_autocast: bool = False
@@ -268,13 +266,13 @@ class MinWMCausalDMDConfig(Wan2_2_TI2V_5B_Config):
         return mean, std
 
     def preprocess_vae_encode(self, image, _vae):
-        # The minWM processor preserves uint8 pixels until the GPU, casts them
+        # The Zing processor preserves uint8 pixels until the GPU, casts them
         # to BF16, then performs div(127.5)-1 in BF16. The generic image stage
         # normalizes in FP32 on CPU first; reconstruct the lossless uint8 grid
         # so rounding and VAE inputs match main exactly.
         pixels = ((image + 1.0) * 127.5).round_().clamp_(0, 255)
         normalized = pixels.to(torch.bfloat16).div_(127.5).sub_(1.0)
-        dump_root = os.environ.get("MINWM_PARITY_DUMP_DIR")
+        dump_root = os.environ.get("ZING_PARITY_DUMP_DIR")
         if dump_root:
             dump_dir = Path(dump_root) / "sglang"
             dump_dir.mkdir(parents=True, exist_ok=True)
@@ -290,7 +288,7 @@ class MinWMCausalDMDConfig(Wan2_2_TI2V_5B_Config):
         return normalized.float().to(torch.float16).to(torch.bfloat16)
 
     def get_decode_scale_and_shift(self, device, dtype, vae):
-        # MinWM decoding multiplies by std directly. Returning identity here
+        # Zing decoding multiplies by std directly. Returning identity here
         # avoids the generic algebraically-equivalent `latent / (1 / std)`,
         # whose BF16 rounding differs.
         del device, dtype, vae
@@ -299,7 +297,7 @@ class MinWMCausalDMDConfig(Wan2_2_TI2V_5B_Config):
     def preprocess_decoding(self, latents, server_args=None, vae=None):
         del server_args
         if vae is None:
-            raise ValueError("MinWM decoding requires the native VAE")
+            raise ValueError("Zing decoding requires the native VAE")
         mean, std = self._native_vae_stats(latents, vae)
         return latents * std + mean
 
@@ -315,11 +313,11 @@ class MinWMCausalDMDConfig(Wan2_2_TI2V_5B_Config):
 
     def postprocess_image_latent(self, latent_condition, _batch):
         # PipelineConfig's generic I2V hook prepends a four-channel temporal
-        # mask. MinWM V3 commits the clean 48-channel VAE latent directly.
+        # mask. Zing V3 commits the clean 48-channel VAE latent directly.
         expected_channels = self.vae_config.arch_config.z_dim
         if latent_condition.shape[1] != expected_channels:
             raise ValueError(
-                "MinWM reference latent must have "
+                "Zing reference latent must have "
                 f"{expected_channels} channels, got {latent_condition.shape[1]}"
             )
         return latent_condition
