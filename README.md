@@ -22,6 +22,31 @@
 <a href="https://github.com/sgl-project/sgl-learning-materials?tab=readme-ov-file#slides"><b>Slides</b></a>
 </p>
 
+## Run Zing-0.5
+
+Complete the one-time installation and model download in the
+[Zing-0.5 setup guide](ZING.md), then start the realtime server:
+
+```bash
+ZING_MODEL_PATH=./models/Zing-0.5-SGLang \
+  examples/zing_0_5/launch_server.sh
+```
+
+In another terminal, generate a four-chunk rollout controlled with the
+<kbd>W</kbd> key:
+
+```bash
+python examples/zing_0_5/client.py \
+  --prompt "A first-person walk through a misty pine forest at sunrise" \
+  --action w \
+  --chunks 4 \
+  --output outputs/forest
+```
+
+The client saves the returned frames under `outputs/forest`. For a 32 GiB
+GPU, add `ZING_PROFILE=32g` to the server command. See the
+[full Zing-0.5 guide](ZING.md) for installation, I2V, and advanced controls.
+
 ## News
 - [2026/07] 🔥 SGLang and Miles add day-0 support for Kimi K3 ([blog](https://lmsys.org/blog/2026-07-27-kimi-k3-day0-support/)).
 - [2026/07] RadixArk and Google bring full SGLang features to TPUs ([blog](https://lmsys.org/blog/2026-07-30-sglang-google-tpu/)).
