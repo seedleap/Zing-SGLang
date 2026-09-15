@@ -18,18 +18,18 @@ namespace sglang {
 
 namespace {
 
-constexpr uint32_t kMinWMHeadDim = 128;
-constexpr uint32_t kMinWMHalfHeadDim = kMinWMHeadDim / 2;
-constexpr uint32_t kMinWMThreadsPerToken = 16;
-constexpr uint32_t kMinWMThreadsPerBlock = 256;
-constexpr uint32_t kMinWMTokensPerBlock = kMinWMThreadsPerBlock / kMinWMThreadsPerToken;
-constexpr uint32_t kMinWMElementsPerLane = kMinWMHeadDim / kMinWMThreadsPerToken;
-constexpr uint32_t kMinWMPairsPerLane = kMinWMElementsPerLane / 2;
+constexpr uint32_t kZingHeadDim = 128;
+constexpr uint32_t kZingHalfHeadDim = kZingHeadDim / 2;
+constexpr uint32_t kZingThreadsPerToken = 16;
+constexpr uint32_t kZingThreadsPerBlock = 256;
+constexpr uint32_t kZingTokensPerBlock = kZingThreadsPerBlock / kZingThreadsPerToken;
+constexpr uint32_t kZingElementsPerLane = kZingHeadDim / kZingThreadsPerToken;
+constexpr uint32_t kZingPairsPerLane = kZingElementsPerLane / 2;
 
-static_assert(kMinWMElementsPerLane * sizeof(bf16_t) == device::kMaxVecBytes);
-static_assert(kMinWMPairsPerLane * sizeof(float) == device::kMaxVecBytes);
+static_assert(kZingElementsPerLane * sizeof(bf16_t) == device::kMaxVecBytes);
+static_assert(kZingPairsPerLane * sizeof(float) == device::kMaxVecBytes);
 
-struct MinWMRotaryParams {
+struct ZingRotaryParams {
   const void* __restrict__ input;
   const float* __restrict__ cos;
   const float* __restrict__ sin;
@@ -41,39 +41,39 @@ struct MinWMRotaryParams {
 
 template <bool kUsePDL, typename DType>
 __global__
-__launch_bounds__(kMinWMThreadsPerBlock) void minwm_rotary_sm90(const MinWMRotaryParams __grid_constant__ params) {
+__launch_bounds__(kZingThreadsPerBlock) void zing_rotary_sm90(const ZingRotaryParams __grid_constant__ params) {
   using namespace device;
 
   static_assert(std::is_same_v<DType, fp16_t> || std::is_same_v<DType, bf16_t>);
-  using HiddenVector = AlignedVector<DType, kMinWMElementsPerLane>;
-  using TableVector = AlignedVector<float, kMinWMPairsPerLane>;
+  using HiddenVector = AlignedVector<DType, kZingElementsPerLane>;
+  using TableVector = AlignedVector<float, kZingPairsPerLane>;
 
-  const uint32_t token_in_block = threadIdx.x / kMinWMThreadsPerToken;
-  const uint32_t lane_in_token = threadIdx.x % kMinWMThreadsPerToken;
-  const uint32_t num_workers = gridDim.x * kMinWMTokensPerBlock;
+  const uint32_t token_in_block = threadIdx.x / kZingThreadsPerToken;
+  const uint32_t lane_in_token = threadIdx.x % kZingThreadsPerToken;
+  const uint32_t num_workers = gridDim.x * kZingTokensPerBlock;
 
   PDLWaitPrimary<kUsePDL>();
 
-  for (uint32_t token = blockIdx.x * kMinWMTokensPerBlock + token_in_block; token < params.num_tokens;
+  for (uint32_t token = blockIdx.x * kZingTokensPerBlock + token_in_block; token < params.num_tokens;
        token += num_workers) {
     const uint32_t sequence_idx = token % params.sequence_length;
     const auto input =
-        static_cast<const DType*>(params.input) + static_cast<int64_t>(token) * params.num_heads * kMinWMHeadDim;
-    auto output = static_cast<DType*>(params.output) + static_cast<int64_t>(token) * params.num_heads * kMinWMHeadDim;
+        static_cast<const DType*>(params.input) + static_cast<int64_t>(token) * params.num_heads * kZingHeadDim;
+    auto output = static_cast<DType*>(params.output) + static_cast<int64_t>(token) * params.num_heads * kZingHeadDim;
 
     TableVector cos;
     TableVector sin;
-    cos.load(params.cos + static_cast<int64_t>(sequence_idx) * kMinWMHalfHeadDim, lane_in_token);
-    sin.load(params.sin + static_cast<int64_t>(sequence_idx) * kMinWMHalfHeadDim, lane_in_token);
+    cos.load(params.cos + static_cast<int64_t>(sequence_idx) * kZingHalfHeadDim, lane_in_token);
+    sin.load(params.sin + static_cast<int64_t>(sequence_idx) * kZingHalfHeadDim, lane_in_token);
 
 #pragma unroll 1
     for (uint32_t head = 0; head < params.num_heads; ++head) {
       HiddenVector x;
       HiddenVector y;
-      x.load(input + static_cast<int64_t>(head) * kMinWMHeadDim, lane_in_token);
+      x.load(input + static_cast<int64_t>(head) * kZingHeadDim, lane_in_token);
 
 #pragma unroll
-      for (uint32_t pair = 0; pair < kMinWMPairsPerLane; ++pair) {
+      for (uint32_t pair = 0; pair < kZingPairsPerLane; ++pair) {
         const float real = cast<float>(x[2 * pair]);
         const float imaginary = cast<float>(x[2 * pair + 1]);
         const float real_cos = __fmul_rn(real, cos[pair]);
@@ -83,7 +83,7 @@ __launch_bounds__(kMinWMThreadsPerBlock) void minwm_rotary_sm90(const MinWMRotar
         y[2 * pair] = cast<DType>(__fsub_rn(real_cos, imaginary_sin));
         y[2 * pair + 1] = cast<DType>(__fadd_rn(real_sin, imaginary_cos));
       }
-      y.store(output + static_cast<int64_t>(head) * kMinWMHeadDim, lane_in_token);
+      y.store(output + static_cast<int64_t>(head) * kZingHeadDim, lane_in_token);
     }
   }
 
@@ -91,7 +91,7 @@ __launch_bounds__(kMinWMThreadsPerBlock) void minwm_rotary_sm90(const MinWMRotar
 }
 
 template <bool kUsePDL, typename DType>
-struct MinWMRotaryKernel {
+struct ZingRotaryKernel {
   static void
   run(const tvm::ffi::TensorView input,
       const tvm::ffi::TensorView cos,
@@ -106,28 +106,28 @@ struct MinWMRotaryKernel {
     auto S = SymbolicSize{"sequence_length"};
     auto R = SymbolicSize{"half_head_dim"};
     auto device = SymbolicDevice{};
-    D.set_value(kMinWMHeadDim);
-    R.set_value(kMinWMHalfHeadDim);
+    D.set_value(kZingHeadDim);
+    R.set_value(kZingHalfHeadDim);
     device.set_options<kDLCUDA>();
 
     TensorMatcher({N, H, D})
-        .with_strides({-1, kMinWMHeadDim, 1})
+        .with_strides({-1, kZingHeadDim, 1})
         .with_dtype<DType>()
         .with_device(device)
         .verify(input)
         .verify(output);
     TensorMatcher({S, R})
-        .with_strides({kMinWMHalfHeadDim, 1})
+        .with_strides({kZingHalfHeadDim, 1})
         .with_dtype<float>()
         .with_device(device)
         .verify(cos)
         .verify(sin);
 
-    RuntimeCheck(sequence_length == S.unwrap(), "minwm_rotary: sequence length mismatch");
-    RuntimeCheck(sequence_length > 0, "minwm_rotary: sequence length must be positive");
-    RuntimeCheck(N.unwrap() % sequence_length == 0, "minwm_rotary: token count must contain whole sequences");
+    RuntimeCheck(sequence_length == S.unwrap(), "zing_rotary: sequence length mismatch");
+    RuntimeCheck(sequence_length > 0, "zing_rotary: sequence length must be positive");
+    RuntimeCheck(N.unwrap() % sequence_length == 0, "zing_rotary: token count must contain whole sequences");
 
-    const auto params = MinWMRotaryParams{
+    const auto params = ZingRotaryParams{
         .input = input.data_ptr(),
         .cos = static_cast<const float*>(cos.data_ptr()),
         .sin = static_cast<const float*>(sin.data_ptr()),
@@ -137,12 +137,12 @@ struct MinWMRotaryKernel {
         .num_heads = static_cast<uint32_t>(H.unwrap()),
     };
 
-    constexpr auto kernel = minwm_rotary_sm90<kUsePDL, DType>;
-    static const uint32_t max_occupancy = runtime::get_blocks_per_sm(kernel, kMinWMThreadsPerBlock);
+    constexpr auto kernel = zing_rotary_sm90<kUsePDL, DType>;
+    static const uint32_t max_occupancy = runtime::get_blocks_per_sm(kernel, kZingThreadsPerBlock);
     const uint32_t num_sms = runtime::get_sm_count(device.unwrap().device_id);
-    const uint32_t needed_blocks = div_ceil(params.num_tokens, kMinWMTokensPerBlock);
+    const uint32_t needed_blocks = div_ceil(params.num_tokens, kZingTokensPerBlock);
     const uint32_t num_blocks = std::min(needed_blocks, max_occupancy * num_sms);
-    LaunchKernel(num_blocks, kMinWMThreadsPerBlock, device.unwrap()).enable_pdl(kUsePDL)(kernel, params);
+    LaunchKernel(num_blocks, kZingThreadsPerBlock, device.unwrap()).enable_pdl(kUsePDL)(kernel, params);
   }
 };
 

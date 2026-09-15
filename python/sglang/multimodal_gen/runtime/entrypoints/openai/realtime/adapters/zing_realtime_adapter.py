@@ -1,5 +1,5 @@
 # Copyright 2026 Seedleap.ai
-# Adapted from the Apache-2.0 minWM action-conditioning implementation.
+# Adapted from the Apache-2.0 Zing action-conditioning implementation.
 # SPDX-License-Identifier: Apache-2.0
 """Realtime control adapter for Zing's discrete primitive actions."""
 
@@ -8,16 +8,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from sglang.multimodal_gen.configs.pipeline_configs.zing import (
-    MINWM_ACTION_LABELS_CONDITION,
-    MINWM_ACTION_WEIGHTS_CONDITION,
-    MINWM_CHUNK_SEED_CONDITION,
-    MINWM_CHUNK_SEED_PREFIX_FRAMES_CONDITION,
-    MINWM_CHUNK_SEEDS_INPUT,
-    MINWM_CONDITION_SWITCH_CONDITION,
-    MINWM_PROMPT_SCHEDULE_INPUT,
-    MINWM_PROMPT_UPDATED_CONDITION,
-    MINWM_TOTAL_CHUNKS_CONDITION,
-    MINWM_TOTAL_LATENT_FRAMES_CONDITION,
+    ZING_ACTION_LABELS_CONDITION,
+    ZING_ACTION_WEIGHTS_CONDITION,
+    ZING_CHUNK_SEED_CONDITION,
+    ZING_CHUNK_SEED_PREFIX_FRAMES_CONDITION,
+    ZING_CHUNK_SEEDS_INPUT,
+    ZING_CONDITION_SWITCH_CONDITION,
+    ZING_PROMPT_SCHEDULE_INPUT,
+    ZING_PROMPT_UPDATED_CONDITION,
+    ZING_TOTAL_CHUNKS_CONDITION,
+    ZING_TOTAL_LATENT_FRAMES_CONDITION,
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
     RealtimeEvent,
@@ -48,18 +48,18 @@ if TYPE_CHECKING:
     )
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
-MINWM_DEFAULT_DMD_STEPS = 4
-MINWM_CAMERA_CONTROL_MIN_PULSE_ITEMS = 2
+ZING_DEFAULT_DMD_STEPS = 4
+ZING_CAMERA_CONTROL_MIN_PULSE_ITEMS = 2
 
 
-class MinWMRealtimeState(RealtimeCameraControlState):
+class ZingRealtimeState(RealtimeCameraControlState):
     def __init__(self) -> None:
         # Zing consumes four latent action labels per regular chunk. A quick
         # key press and release can both arrive while the current chunk is
         # already running, so preserve the action for half of the next chunk
         # instead of reducing it to one weak conditioning step.
         super().__init__(
-            min_pulse_items=MINWM_CAMERA_CONTROL_MIN_PULSE_ITEMS,
+            min_pulse_items=ZING_CAMERA_CONTROL_MIN_PULSE_ITEMS,
             script_maxlen=4096,
             max_transitions=512,
         )
@@ -141,7 +141,7 @@ class MinWMRealtimeState(RealtimeCameraControlState):
         switch_kind: str = "prompt",
     ) -> None:
         if switch_kind not in {"prompt", "scene_cut"}:
-            raise ValueError("MinWM condition switch must be prompt or scene_cut")
+            raise ValueError("Zing condition switch must be prompt or scene_cut")
         self.prompt_queue.replace(
             "condition_switch",
             {"kind": switch_kind, "prompt": prompt},
@@ -166,11 +166,11 @@ class MinWMRealtimeState(RealtimeCameraControlState):
     def sample_prompt(self) -> tuple[str, str]:
         condition_switch = self.prompt_queue.pop_latest("condition_switch")
         if not isinstance(condition_switch, dict):
-            raise ValueError("MinWM condition switch payload must be an object")
+            raise ValueError("Zing condition switch payload must be an object")
         prompt = condition_switch.get("prompt")
         switch_kind = condition_switch.get("kind")
         if not isinstance(prompt, str) or switch_kind not in {"prompt", "scene_cut"}:
-            raise ValueError("invalid MinWM condition switch payload")
+            raise ValueError("invalid Zing condition switch payload")
         self.prompt_event_id = self.prompt_queue.last_sampled_seq_id("condition_switch")
         return prompt, switch_kind
 
@@ -190,15 +190,15 @@ class MinWMRealtimeState(RealtimeCameraControlState):
         return validate_action_weights(weights, expected_frames=frame_count)
 
 
-class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
-    def create_state(self) -> MinWMRealtimeState:
-        return MinWMRealtimeState()
+class ZingRealtimeAdapter(BaseRealtimeModelAdapter):
+    def create_state(self) -> ZingRealtimeState:
+        return ZingRealtimeState()
 
     @staticmethod
-    def _state(session: GenerateSession) -> MinWMRealtimeState:
+    def _state(session: GenerateSession) -> ZingRealtimeState:
         state = session.adapter_state
-        if not isinstance(state, MinWMRealtimeState):
-            raise TypeError("MinWM realtime adapter state is not initialized")
+        if not isinstance(state, ZingRealtimeState):
+            raise TypeError("Zing realtime adapter state is not initialized")
         return state
 
     @staticmethod
@@ -229,18 +229,18 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
             if isinstance(seed, bool) or not isinstance(seed, int):
                 raise ValueError("chunk_seeds must be a non-empty list[int]")
             if not 0 <= seed < 2**63:
-                raise ValueError("MinWM chunk seeds must be in [0, 2**63)")
+                raise ValueError("Zing chunk seeds must be in [0, 2**63)")
             seeds.append(seed)
         return seeds
 
     @staticmethod
     def _validate_prompt_schedule(payload: Any) -> dict[int, tuple[str, str]]:
         if not isinstance(payload, list):
-            raise ValueError("minwm_prompt_schedule must be a list")
+            raise ValueError("zing_prompt_schedule must be a list")
         schedule = {}
         for item in payload:
             if not isinstance(item, dict):
-                raise ValueError("each MinWM prompt schedule item must be an object")
+                raise ValueError("each Zing prompt schedule item must be an object")
             target_chunk = item.get("target_chunk")
             prompt = item.get("prompt")
             switch_kind = item.get("kind", "prompt")
@@ -250,18 +250,16 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
                 or target_chunk < 1
             ):
                 raise ValueError(
-                    "MinWM prompt schedule target_chunk must be a positive integer"
+                    "Zing prompt schedule target_chunk must be a positive integer"
                 )
             if not isinstance(prompt, str) or not prompt.strip():
-                raise ValueError("MinWM prompt schedule prompt must be non-empty")
+                raise ValueError("Zing prompt schedule prompt must be non-empty")
             if switch_kind not in {"prompt", "scene_cut"}:
                 raise ValueError(
-                    "MinWM prompt schedule kind must be prompt or scene_cut"
+                    "Zing prompt schedule kind must be prompt or scene_cut"
                 )
             if target_chunk in schedule:
-                raise ValueError(
-                    f"duplicate MinWM prompt schedule chunk {target_chunk}"
-                )
+                raise ValueError(f"duplicate Zing prompt schedule chunk {target_chunk}")
             schedule[target_chunk] = (prompt, switch_kind)
         return schedule
 
@@ -271,17 +269,17 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
         request: RealtimeVideoGenerationsRequest,
     ) -> None:
         state = self._state(session)
-        if request.num_inference_steps not in (None, MINWM_DEFAULT_DMD_STEPS):
-            raise ValueError("MinWM DMD checkpoint requires exactly 4 inference steps")
+        if request.num_inference_steps not in (None, ZING_DEFAULT_DMD_STEPS):
+            raise ValueError("Zing DMD checkpoint requires exactly 4 inference steps")
         # The distilled student has no CFG lane. The realtime protocol defaults
         # to guidance_scale=1 for other models, so normalize it explicitly.
-        request.num_inference_steps = MINWM_DEFAULT_DMD_STEPS
+        request.num_inference_steps = ZING_DEFAULT_DMD_STEPS
         request.guidance_scale = 0.0
         request.guidance_scale_2 = None
         self._normalize_generation_mode(request)
         inputs = request.condition_inputs or {}
         chunk_seeds_value = inputs.get(
-            "chunk_seeds", inputs.get(MINWM_CHUNK_SEEDS_INPUT)
+            "chunk_seeds", inputs.get(ZING_CHUNK_SEEDS_INPUT)
         )
         chunk_seeds = (
             None
@@ -291,23 +289,23 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
         if chunk_seeds is not None:
             state.receive_chunk_seeds(chunk_seeds)
         prompt_schedule = self._validate_prompt_schedule(
-            inputs.get(MINWM_PROMPT_SCHEDULE_INPUT, [])
+            inputs.get(ZING_PROMPT_SCHEDULE_INPUT, [])
         )
         state.receive_prompt_schedule(prompt_schedule)
         label_values = [
             value
-            for key in ("action_labels", MINWM_ACTION_LABELS_CONDITION)
+            for key in ("action_labels", ZING_ACTION_LABELS_CONDITION)
             if (value := inputs.get(key)) is not None
         ]
         weight_values = [
             value
-            for key in ("action_weights", MINWM_ACTION_WEIGHTS_CONDITION)
+            for key in ("action_weights", ZING_ACTION_WEIGHTS_CONDITION)
             if (value := inputs.get(key)) is not None
         ]
         camera_actions = inputs.get("camera_actions")
         if len(label_values) + len(weight_values) + int(camera_actions is not None) > 1:
             raise ValueError(
-                "pass exactly one MinWM action form: action_labels, action_weights, or camera_actions"
+                "pass exactly one Zing action form: action_labels, action_weights, or camera_actions"
             )
         if label_values:
             state.receive_action_labels(validate_action_labels(label_values[0]))
@@ -335,7 +333,7 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
             total_chunks = 1 + max(0, remaining + regular_block - 1) // regular_block
             if request.max_chunks is not None and request.max_chunks != total_chunks:
                 raise ValueError(
-                    "MinWM T2V max_chunks does not match num_frames: "
+                    "Zing T2V max_chunks does not match num_frames: "
                     f"expected {total_chunks}, got {request.max_chunks}"
                 )
             request.max_chunks = total_chunks
@@ -345,13 +343,13 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
             and len(chunk_seeds) != request.max_chunks
         ):
             raise ValueError(
-                "MinWM chunk_seeds length must match max_chunks: "
+                "Zing chunk_seeds length must match max_chunks: "
                 f"{len(chunk_seeds)} vs {request.max_chunks}"
             )
         if request.max_chunks is not None and any(
             chunk_index >= request.max_chunks for chunk_index in prompt_schedule
         ):
-            raise ValueError("MinWM prompt schedule target is outside max_chunks")
+            raise ValueError("Zing prompt schedule target is outside max_chunks")
 
     @staticmethod
     def _normalize_generation_mode(
@@ -360,9 +358,9 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
         inferred_mode = "i2v" if request.first_frame is not None else "t2v"
         requested_mode = request.generation_mode
         if requested_mode == "i2v" and request.first_frame is None:
-            raise ValueError("MinWM I2V requires first_frame")
+            raise ValueError("Zing I2V requires first_frame")
         if requested_mode == "t2v" and request.first_frame is not None:
-            raise ValueError("MinWM T2V does not accept first_frame")
+            raise ValueError("Zing T2V does not accept first_frame")
         request.generation_mode = requested_mode or inferred_mode
 
     @staticmethod
@@ -378,10 +376,7 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
         server_args: ServerArgs,
     ) -> int | None:
         num_frames_value = getattr(request, "num_frames", None)
-        if (
-            not MinWMRealtimeAdapter._is_t2v_request(request)
-            or num_frames_value is None
-        ):
+        if not ZingRealtimeAdapter._is_t2v_request(request) or num_frames_value is None:
             return None
         num_frames = int(num_frames_value)
         temporal_factor = int(
@@ -389,7 +384,7 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
         )
         if num_frames < 1 or (num_frames - 1) % temporal_factor:
             raise ValueError(
-                "MinWM T2V num_frames must equal "
+                "Zing T2V num_frames must equal "
                 f"1 + N * {temporal_factor}, got {num_frames}"
             )
         total_latent_frames = 1 + (num_frames - 1) // temporal_factor
@@ -398,7 +393,7 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
         )
         if total_latent_frames < first_block:
             raise ValueError(
-                "MinWM T2V num_frames is shorter than num_frame_first_block"
+                "Zing T2V num_frames is shorter than num_frame_first_block"
             )
         return total_latent_frames
 
@@ -422,7 +417,7 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
         generated_before = first_block + (chunk.index - 1) * regular_block
         remaining = total_latent_frames - generated_before
         if remaining <= 0:
-            raise ValueError("MinWM T2V request exceeded num_frames")
+            raise ValueError("Zing T2V request exceeded num_frames")
         return min(regular_block, remaining)
 
     def ingest_event(self, session: GenerateSession, event: RealtimeEvent) -> str:
@@ -454,7 +449,7 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
             seeds = self._validate_chunk_seeds(payload)
             state.receive_chunk_seeds(seeds, event_id=event.event_id)
             return f"kind={event.kind}, seeds={len(seeds)}"
-        raise ValueError(f"unsupported MinWM event kind: {event.kind}")
+        raise ValueError(f"unsupported Zing event kind: {event.kind}")
 
     def sample_chunk_inputs(
         self,
@@ -490,27 +485,27 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
                 if t2v_first_block
                 else state.sample_action_weights(chunk_size * temporal_factor)
             )
-            condition_inputs[MINWM_ACTION_WEIGHTS_CONDITION] = [
+            condition_inputs[ZING_ACTION_WEIGHTS_CONDITION] = [
                 rows[start : start + temporal_factor]
                 for start in range(0, len(rows), temporal_factor)
             ]
         else:
-            condition_inputs[MINWM_ACTION_LABELS_CONDITION] = (
+            condition_inputs[ZING_ACTION_LABELS_CONDITION] = (
                 [0] * chunk_size
                 if t2v_first_block
                 else state.sample_action_labels(chunk_size)
             )
         if request.max_chunks is not None:
-            condition_inputs[MINWM_TOTAL_CHUNKS_CONDITION] = int(request.max_chunks)
+            condition_inputs[ZING_TOTAL_CHUNKS_CONDITION] = int(request.max_chunks)
         total_latent_frames = self._t2v_total_latent_frames(request, server_args)
         if total_latent_frames is not None:
-            condition_inputs[MINWM_TOTAL_LATENT_FRAMES_CONDITION] = total_latent_frames
+            condition_inputs[ZING_TOTAL_LATENT_FRAMES_CONDITION] = total_latent_frames
         if prompt_updated:
-            condition_inputs[MINWM_PROMPT_UPDATED_CONDITION] = True
-            condition_inputs[MINWM_CONDITION_SWITCH_CONDITION] = condition_switch
+            condition_inputs[ZING_PROMPT_UPDATED_CONDITION] = True
+            condition_inputs[ZING_CONDITION_SWITCH_CONDITION] = condition_switch
         chunk_seed = state.sample_chunk_seed()
         if chunk_seed is not None:
-            condition_inputs[MINWM_CHUNK_SEED_CONDITION] = chunk_seed
+            condition_inputs[ZING_CHUNK_SEED_CONDITION] = chunk_seed
             if not self._is_t2v_request(request):
                 prefix_frames = 1 + chunk.index * int(
                     server_args.pipeline_config.dit_config.arch_config.num_frames_per_block
@@ -522,7 +517,7 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
                 prefix_frames = int(arch_config.num_frame_first_block) + (
                     chunk.index - 1
                 ) * int(arch_config.num_frames_per_block)
-            condition_inputs[MINWM_CHUNK_SEED_PREFIX_FRAMES_CONDITION] = prefix_frames
+            condition_inputs[ZING_CHUNK_SEED_PREFIX_FRAMES_CONDITION] = prefix_frames
         return RealtimeChunkInputs(prompt=prompt, condition_inputs=condition_inputs)
 
     def build_sampling_params(
@@ -542,7 +537,7 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
             request=request,
             chunk_inputs=chunk_inputs,
             num_frames=1,
-            num_inference_steps=request.num_inference_steps or MINWM_DEFAULT_DMD_STEPS,
+            num_inference_steps=request.num_inference_steps or ZING_DEFAULT_DMD_STEPS,
             chunk_size=chunk_size,
         )
 
@@ -550,7 +545,7 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
         return self._get_state_realtime_event_id(self._state(session))
 
     @staticmethod
-    def _get_state_realtime_event_id(state: MinWMRealtimeState) -> int | None:
+    def _get_state_realtime_event_id(state: ZingRealtimeState) -> int | None:
         # Realtime clients issue monotonically increasing event IDs and the
         # playback cutover waits for frame.event_id >= the pending event.
         # A chunk can sample prompt and action state together, so report the
@@ -570,5 +565,5 @@ class MinWMRealtimeAdapter(BaseRealtimeModelAdapter):
 
     def clear_state(self, session: GenerateSession) -> None:
         state = session.adapter_state
-        if isinstance(state, MinWMRealtimeState):
+        if isinstance(state, ZingRealtimeState):
             state.clear()

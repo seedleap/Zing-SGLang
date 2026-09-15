@@ -9,50 +9,50 @@ import pytest
 import torch
 
 from sglang.multimodal_gen.configs.models.dits.zing import (
-    MinWMVideoArchConfig,
-    MinWMVideoConfig,
+    ZingVideoArchConfig,
+    ZingVideoConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.zing import (
-    MINWM_ACTION_LABELS_CONDITION,
-    MINWM_ACTION_WEIGHTS_CONDITION,
-    MINWM_CHUNK_SEED_CONDITION,
-    MINWM_CHUNK_SEED_PREFIX_FRAMES_CONDITION,
-    MINWM_CONDITION_SWITCH_CONDITION,
-    MINWM_PROMPT_UPDATED_CONDITION,
-    MINWM_TOTAL_CHUNKS_CONDITION,
-    MINWM_TOTAL_LATENT_FRAMES_CONDITION,
-    MinWMCausalDMDConfig,
-    minwm_t5_postprocess_text,
+    ZING_ACTION_LABELS_CONDITION,
+    ZING_ACTION_WEIGHTS_CONDITION,
+    ZING_CHUNK_SEED_CONDITION,
+    ZING_CHUNK_SEED_PREFIX_FRAMES_CONDITION,
+    ZING_CONDITION_SWITCH_CONDITION,
+    ZING_PROMPT_UPDATED_CONDITION,
+    ZING_TOTAL_CHUNKS_CONDITION,
+    ZING_TOTAL_LATENT_FRAMES_CONDITION,
+    ZingCausalDMDConfig,
+    zing_t5_postprocess_text,
 )
-from sglang.multimodal_gen.configs.sample.zing import MinWMSamplingParams
+from sglang.multimodal_gen.configs.sample.zing import ZingSamplingParams
 from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
     RealtimeVideoGenerationsRequest,
 )
 from sglang.multimodal_gen.runtime.entrypoints.openai.realtime.adapters.zing_realtime_adapter import (
-    MinWMRealtimeAdapter,
-    MinWMRealtimeState,
+    ZingRealtimeAdapter,
+    ZingRealtimeState,
 )
 from sglang.multimodal_gen.runtime.models.dits.zing import (
-    MinWMCausalSelfAttention,
-    MinWMCausalTransformer3DModel,
-    MinWMPatchEmbed,
-    MinWMRMSNorm,
+    ZingCausalSelfAttention,
+    ZingCausalTransformer3DModel,
+    ZingPatchEmbed,
+    ZingRMSNorm,
     _frame_gate,
     _frame_modulation,
-    _minwm_adaln_modulation,
-    _minwm_adaln_op,
-    _minwm_apply_qk_op,
-    _minwm_frame_indices,
-    _minwm_layer_norm,
-    _minwm_packed_attention_backend,
-    _minwm_project_output_in_reference_row_bucket,
-    _minwm_qk_norm_op,
-    _minwm_qk_norm_rope_op,
-    _minwm_should_restore_reference_output_projection,
-    _minwm_uniform_cu_seqlens,
-    _minwm_uniform_frame_indices,
-    apply_minwm_rotary_embedding,
-    apply_minwm_rotary_embedding_out,
+    _zing_adaln_modulation,
+    _zing_adaln_op,
+    _zing_apply_qk_op,
+    _zing_frame_indices,
+    _zing_layer_norm,
+    _zing_packed_attention_backend,
+    _zing_project_output_in_reference_row_bucket,
+    _zing_qk_norm_op,
+    _zing_qk_norm_rope_op,
+    _zing_should_restore_reference_output_projection,
+    _zing_uniform_cu_seqlens,
+    _zing_uniform_frame_indices,
+    apply_zing_rotary_embedding,
+    apply_zing_rotary_embedding_out,
 )
 from sglang.multimodal_gen.runtime.models.dits.zing_action import (
     PrimitiveRoPETokenResidualActionEncoder,
@@ -63,22 +63,21 @@ from sglang.multimodal_gen.runtime.models.dits.zing_action import (
     validate_action_weights,
 )
 from sglang.multimodal_gen.runtime.models.dits.zing_kv_cache import (
-    MinWMCausalSelfAttentionKVCache,
+    ZingCausalSelfAttentionKVCache,
 )
 from sglang.multimodal_gen.runtime.pipelines.zing_causal_dmd_pipeline import (
-    MinWMCausalDMDPipeline,
-    MinWMCausalUniPCPipeline,
     ZingCausalDMDPipeline,
+    ZingCausalUniPCPipeline,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing.zing_causal_denoising import (
-    MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE,
-    MinWMCausalDMDDenoisingStage,
-    MinWMCausalUniPCDenoisingStage,
-    MinWMCausalVaeDecodingStage,
-    MinWMChunkLatentPreparationStage,
+    ZING_ACTION_RESIDUAL_PREPARE_NVTX_RANGE,
+    ZingCausalDMDDenoisingStage,
+    ZingCausalUniPCDenoisingStage,
+    ZingCausalVaeDecodingStage,
+    ZingChunkLatentPreparationStage,
     _cuda_graph_attention_plan_signature,
-    _MinWMCudaGraphRunner,
+    _ZingCudaGraphRunner,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
     CausalVaeDecodingStage,
@@ -86,7 +85,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime.vae import (
 from sglang.multimodal_gen.runtime.realtime.session import RealtimeSession
 
 
-def test_minwm_denoising_declares_transformer_residency_use(monkeypatch):
+def test_zing_denoising_declares_transformer_residency_use(monkeypatch):
     transformer = object()
     calls = []
 
@@ -95,7 +94,7 @@ def test_minwm_denoising_declares_transformer_residency_use(monkeypatch):
         calls.append((use.component_name, use.phase, module))
         yield module
 
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage.transformer = transformer
     stage.transformer_2 = None
     stage.vae = None
@@ -114,7 +113,7 @@ def test_minwm_denoising_declares_transformer_residency_use(monkeypatch):
     assert calls == [("transformer", "transformer", transformer)]
 
 
-def _make_minwm_runtime_alignment_fixture():
+def _make_zing_runtime_alignment_fixture():
     layer_count = 30
     cache_tokens = 22
     sink_tokens = 6
@@ -129,7 +128,7 @@ def _make_minwm_runtime_alignment_fixture():
         scene_cut_rope_offset=0,
         scene_cut_sink_enabled=False,
     )
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage.transformer = SimpleNamespace(
         num_attention_heads=attention_heads,
         config=arch_config,
@@ -139,7 +138,7 @@ def _make_minwm_runtime_alignment_fixture():
     stage.sink_size = arch_config.sink_size
     stage.sliding_window_num_frames = arch_config.sliding_window_num_frames
     stage.num_token_per_frame = 2
-    stage._minwm_unbounded_cache = False
+    stage._zing_unbounded_cache = False
     batch = SimpleNamespace(
         enable_sequence_shard=False,
         realtime_causal_sink_size=3,
@@ -166,13 +165,13 @@ def _make_minwm_runtime_alignment_fixture():
 
 def _runtime_alignment_json(log_calls):
     payloads = [
-        call[1] for call in log_calls if call[0] == "MINWM_RUNTIME_ALIGNMENT_JSON %s"
+        call[1] for call in log_calls if call[0] == "ZING_RUNTIME_ALIGNMENT_JSON %s"
     ]
     assert len(payloads) == 1
     return json.loads(payloads[0])
 
 
-def test_minwm_runtime_alignment_validates_all_30_layers_without_hardcoding_config(
+def test_zing_runtime_alignment_validates_all_30_layers_without_hardcoding_config(
     monkeypatch,
 ):
     from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing import (
@@ -185,13 +184,13 @@ def test_minwm_runtime_alignment_validates_all_30_layers_without_hardcoding_conf
         "logger",
         SimpleNamespace(info=lambda *args: log_calls.append(args)),
     )
-    stage, batch, cache_ctx = _make_minwm_runtime_alignment_fixture()
+    stage, batch, cache_ctx = _make_zing_runtime_alignment_fixture()
 
     stage._log_runtime_alignment_once(batch, cache_ctx)
     stage._log_runtime_alignment_once(batch, cache_ctx)
 
     assert len(log_calls) == 2
-    assert log_calls[0][0].startswith("MINWM_RUNTIME_ALIGNMENT")
+    assert log_calls[0][0].startswith("ZING_RUNTIME_ALIGNMENT")
     alignment = _runtime_alignment_json(log_calls)
     assert alignment["all_match"] is True
     assert alignment["layer_count"] == 30
@@ -205,7 +204,7 @@ def test_minwm_runtime_alignment_validates_all_30_layers_without_hardcoding_conf
     assert alignment["observed"]["sink_token_counts"] == [6]
 
 
-def test_minwm_runtime_alignment_reports_layer_17_mismatch(monkeypatch):
+def test_zing_runtime_alignment_reports_layer_17_mismatch(monkeypatch):
     from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing import (
         zing_causal_denoising,
     )
@@ -216,7 +215,7 @@ def test_minwm_runtime_alignment_reports_layer_17_mismatch(monkeypatch):
         "logger",
         SimpleNamespace(info=lambda *args: log_calls.append(args)),
     )
-    stage, batch, cache_ctx = _make_minwm_runtime_alignment_fixture()
+    stage, batch, cache_ctx = _make_zing_runtime_alignment_fixture()
     cache_ctx.kv_cache[17].rope_max_frame_gap = 6
 
     with pytest.raises(RuntimeError, match="layer 17"):
@@ -243,7 +242,7 @@ def test_minwm_runtime_alignment_reports_layer_17_mismatch(monkeypatch):
         ("i2v", b"image", "i2v"),
     ],
 )
-def test_minwm_normalizes_realtime_generation_mode(
+def test_zing_normalizes_realtime_generation_mode(
     requested_mode, first_frame, expected_mode
 ):
     request = RealtimeVideoGenerationsRequest(
@@ -253,7 +252,7 @@ def test_minwm_normalizes_realtime_generation_mode(
         first_frame=first_frame,
     )
 
-    MinWMRealtimeAdapter._normalize_generation_mode(request)
+    ZingRealtimeAdapter._normalize_generation_mode(request)
 
     assert request.generation_mode == expected_mode
 
@@ -265,7 +264,7 @@ def test_minwm_normalizes_realtime_generation_mode(
         ("t2v", b"image", "T2V does not accept first_frame"),
     ],
 )
-def test_minwm_rejects_generation_mode_input_mismatch(
+def test_zing_rejects_generation_mode_input_mismatch(
     requested_mode, first_frame, message
 ):
     request = RealtimeVideoGenerationsRequest(
@@ -276,7 +275,7 @@ def test_minwm_rejects_generation_mode_input_mismatch(
     )
 
     with pytest.raises(ValueError, match=message):
-        MinWMRealtimeAdapter._normalize_generation_mode(request)
+        ZingRealtimeAdapter._normalize_generation_mode(request)
 
 
 @pytest.mark.parametrize(
@@ -297,11 +296,11 @@ def test_minwm_rejects_generation_mode_input_mismatch(
         (["up", "right"], 5),
     ],
 )
-def test_minwm_action_key_ontology(keys, expected):
+def test_zing_action_key_ontology(keys, expected):
     assert key_state_to_action_label(keys) == expected
 
 
-def test_minwm_action_label_bits_match_wasd_ijkl_order():
+def test_zing_action_label_bits_match_wasd_ijkl_order():
     labels = torch.tensor([[0, 9, 1, 10, 45, 7]])
     bits = action_labels_to_primitive_bits(labels).to(torch.int64)
     assert bits.tolist() == [
@@ -320,7 +319,7 @@ def test_minwm_action_label_bits_match_wasd_ijkl_order():
     "encoder_cls",
     [PrimitiveTokenResidualActionEncoder, PrimitiveRoPETokenResidualActionEncoder],
 )
-def test_minwm_action_label_table_is_a_nonpersistent_model_buffer(encoder_cls):
+def test_zing_action_label_table_is_a_nonpersistent_model_buffer(encoder_cls):
     encoder = encoder_cls(dim=24, embed_dim=8, hidden_dim=16, kernel_size=3)
     assert "_label_to_bits" in dict(encoder.named_buffers())
     assert "_label_to_bits" not in encoder.state_dict()
@@ -350,15 +349,15 @@ def test_minwm_action_label_table_is_a_nonpersistent_model_buffer(encoder_cls):
         ("l", 1),
     ],
 )
-def test_minwm_realtime_state_preserves_single_key_direction(key, expected_label):
-    state = MinWMRealtimeState()
+def test_zing_realtime_state_preserves_single_key_direction(key, expected_label):
+    state = ZingRealtimeState()
     state.receive_camera_state([key], event_id=17)
     assert state.sample_action_labels(4) == [expected_label] * 4
     assert state.latest_sampled_event_id == 17
 
 
-def test_minwm_realtime_state_preserves_short_press_for_half_chunk():
-    state = MinWMRealtimeState()
+def test_zing_realtime_state_preserves_short_press_for_half_chunk():
+    state = ZingRealtimeState()
     state.receive_camera_state(["w"], event_id=17)
     state.receive_camera_state([], event_id=18)
 
@@ -368,35 +367,35 @@ def test_minwm_realtime_state_preserves_short_press_for_half_chunk():
     assert state.sample_action_labels(4) == [0, 0, 0, 0]
 
 
-def test_minwm_realtime_action_switch_reaches_next_chunk():
-    state = MinWMRealtimeState()
+def test_zing_realtime_action_switch_reaches_next_chunk():
+    state = ZingRealtimeState()
     session = SimpleNamespace(
         adapter_state=state,
         request=SimpleNamespace(prompt="street", max_chunks=None),
     )
-    adapter = MinWMRealtimeAdapter()
+    adapter = ZingRealtimeAdapter()
     server_args = SimpleNamespace()
 
     idle = adapter.sample_chunk_inputs(
         session, server_args, SimpleNamespace(index=0), chunk_size=4
     )
-    assert idle.condition_inputs[MINWM_ACTION_LABELS_CONDITION] == [0, 0, 0, 0]
+    assert idle.condition_inputs[ZING_ACTION_LABELS_CONDITION] == [0, 0, 0, 0]
 
     state.receive_camera_state(["l"], event_id=21)
     turning = adapter.sample_chunk_inputs(
         session, server_args, SimpleNamespace(index=1), chunk_size=4
     )
-    assert turning.condition_inputs[MINWM_ACTION_LABELS_CONDITION] == [1, 1, 1, 1]
+    assert turning.condition_inputs[ZING_ACTION_LABELS_CONDITION] == [1, 1, 1, 1]
     assert adapter.get_realtime_event_id(session) == 21
 
 
-def test_minwm_prompt_switch_reports_prompt_event_after_older_camera_event():
-    state = MinWMRealtimeState()
+def test_zing_prompt_switch_reports_prompt_event_after_older_camera_event():
+    state = ZingRealtimeState()
     session = SimpleNamespace(
         adapter_state=state,
         request=SimpleNamespace(prompt="day", max_chunks=None),
     )
-    adapter = MinWMRealtimeAdapter()
+    adapter = ZingRealtimeAdapter()
     server_args = SimpleNamespace()
 
     state.receive_camera_state(["w"], event_id=17)
@@ -409,18 +408,18 @@ def test_minwm_prompt_switch_reports_prompt_event_after_older_camera_event():
     )
 
     assert switched.prompt == "snowy night"
-    assert switched.condition_inputs[MINWM_PROMPT_UPDATED_CONDITION] is True
+    assert switched.condition_inputs[ZING_PROMPT_UPDATED_CONDITION] is True
     assert adapter.get_realtime_event_id(session) == 23
 
 
-def test_minwm_action_validation_is_exact_integer_labels():
+def test_zing_action_validation_is_exact_integer_labels():
     assert validate_action_labels([0, 80], expected_frames=2) == [0, 80]
     for invalid in ([True], [81], [-1], [1.0], torch.tensor([1])):
         with pytest.raises(ValueError):
             validate_action_labels(invalid)
 
 
-def test_minwm_action_weight_validation_preserves_fractional_amplitude():
+def test_zing_action_weight_validation_preserves_fractional_amplitude():
     row = [0.8, 0, 0, 0, 0, 0, 0, 0]
     assert validate_action_weights([row], expected_frames=1) == [
         [0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -430,7 +429,7 @@ def test_minwm_action_weight_validation_preserves_fractional_amplitude():
             validate_action_weights(invalid)
 
 
-def test_minwm_binary_weight_windows_are_label_path_degenerate_case():
+def test_zing_binary_weight_windows_are_label_path_degenerate_case():
     torch.manual_seed(17)
     encoder = PrimitiveTokenResidualActionEncoder(
         dim=24, embed_dim=8, hidden_dim=16, kernel_size=3
@@ -448,7 +447,7 @@ def test_minwm_binary_weight_windows_are_label_path_degenerate_case():
     )
 
 
-def test_minwm_primitive_rope_action_binary_windows_match_labels():
+def test_zing_primitive_rope_action_binary_windows_match_labels():
     torch.manual_seed(29)
     encoder = PrimitiveRoPETokenResidualActionEncoder(
         dim=24, embed_dim=8, hidden_dim=16, kernel_size=3
@@ -463,7 +462,7 @@ def test_minwm_primitive_rope_action_binary_windows_match_labels():
     )
 
 
-def test_minwm_rope_action_non_proj_bias_controls_hidden_biases():
+def test_zing_rope_action_non_proj_bias_controls_hidden_biases():
     with_bias = PrimitiveRoPETokenResidualActionEncoder(
         dim=24, embed_dim=8, hidden_dim=16, kernel_size=3, non_proj_bias=True
     )
@@ -487,7 +486,7 @@ def test_minwm_rope_action_non_proj_bias_controls_hidden_biases():
     }
 
 
-def test_minwm_rope_action_without_hidden_bias_has_constant_idle_residual():
+def test_zing_rope_action_without_hidden_bias_has_constant_idle_residual():
     encoder = PrimitiveRoPETokenResidualActionEncoder(
         dim=24, embed_dim=8, hidden_dim=16, kernel_size=3, non_proj_bias=False
     )
@@ -501,7 +500,7 @@ def test_minwm_rope_action_without_hidden_bias_has_constant_idle_residual():
     torch.testing.assert_close(states, expected, rtol=0, atol=0)
 
 
-def _make_minwm_test_cache(
+def _make_zing_test_cache(
     *,
     cache_size=6,
     sink_tokens=1,
@@ -511,7 +510,7 @@ def _make_minwm_test_cache(
     scene_cut_rope_offset=0,
     scene_cut_sink_enabled=False,
 ):
-    return MinWMCausalSelfAttentionKVCache(
+    return ZingCausalSelfAttentionKVCache(
         k=torch.zeros(1, cache_size, 1, 2),
         v=torch.zeros(1, cache_size, 1, 2),
         global_end_index=torch.zeros(1, dtype=torch.long),
@@ -527,7 +526,7 @@ def _make_minwm_test_cache(
     )
 
 
-def _append_minwm_test_frames(cache, frames, *, token_start):
+def _append_zing_test_frames(cache, frames, *, token_start):
     frames = torch.tensor(frames, dtype=torch.long)
     position_ids = torch.stack(
         [frames, torch.zeros_like(frames), torch.zeros_like(frames)], dim=1
@@ -545,9 +544,9 @@ def _append_minwm_test_frames(cache, frames, *, token_start):
     )
 
 
-def test_minwm_raw_k_cache_overwrites_active_chunk_without_appending():
-    cache = _make_minwm_test_cache(cache_size=4, sink_tokens=0)
-    first = _append_minwm_test_frames(cache, [0, 1], token_start=0)
+def test_zing_raw_k_cache_overwrites_active_chunk_without_appending():
+    cache = _make_zing_test_cache(cache_size=4, sink_tokens=0)
+    first = _append_zing_test_frames(cache, [0, 1], token_start=0)
     replacement = torch.full((1, 2, 1, 2), 7.0)
     cache.update_and_get_attention_kv(
         key=replacement,
@@ -561,9 +560,9 @@ def test_minwm_raw_k_cache_overwrites_active_chunk_without_appending():
     assert first.key_position_ids[:, 0].tolist() == [0, 1]
 
 
-def test_minwm_cache_plan_is_shared_across_layers_and_reused_for_recompute():
-    first_cache = _make_minwm_test_cache(cache_size=6, sink_tokens=1)
-    second_cache = _make_minwm_test_cache(cache_size=6, sink_tokens=1)
+def test_zing_cache_plan_is_shared_across_layers_and_reused_for_recompute():
+    first_cache = _make_zing_test_cache(cache_size=6, sink_tokens=1)
+    second_cache = _make_zing_test_cache(cache_size=6, sink_tokens=1)
     position_ids = torch.tensor([[0, 0, 0], [1, 0, 0]])
     plan = first_cache.prepare_attention_plan(
         current_chunk_start=0,
@@ -603,39 +602,39 @@ def test_minwm_cache_plan_is_shared_across_layers_and_reused_for_recompute():
     )
 
 
-def test_minwm_cache_append_does_not_repack_visible_history(monkeypatch):
-    cache = _make_minwm_test_cache(cache_size=6, sink_tokens=1)
+def test_zing_cache_append_does_not_repack_visible_history(monkeypatch):
+    cache = _make_zing_test_cache(cache_size=6, sink_tokens=1)
 
     def fail_if_selected(*_args, **_kwargs):
         raise AssertionError("non-evicting append must not select and repack history")
 
     monkeypatch.setattr(
-        MinWMCausalSelfAttentionKVCache,
+        ZingCausalSelfAttentionKVCache,
         "_select_kv_with_plan",
         staticmethod(fail_if_selected),
     )
-    _append_minwm_test_frames(cache, [0, 1], token_start=0)
-    _append_minwm_test_frames(cache, [2, 3], token_start=2)
+    _append_zing_test_frames(cache, [0, 1], token_start=0)
+    _append_zing_test_frames(cache, [2, 3], token_start=2)
 
     assert cache.last_attention_plan.preserves_all_history
     assert cache.token_ids.tolist() == [0, 1, 2, 3]
     assert cache.k[0, :4, 0, 0].tolist() == [0.0, 1.0, 2.0, 3.0]
 
 
-def test_minwm_fixed_shape_metadata_is_cached():
-    _minwm_uniform_cu_seqlens.cache_clear()
-    cu_seqlens = _minwm_uniform_cu_seqlens(2, 7, torch.device("cpu"))
+def test_zing_fixed_shape_metadata_is_cached():
+    _zing_uniform_cu_seqlens.cache_clear()
+    cu_seqlens = _zing_uniform_cu_seqlens(2, 7, torch.device("cpu"))
     assert cu_seqlens.tolist() == [0, 7, 14]
-    assert _minwm_uniform_cu_seqlens(2, 7, torch.device("cpu")) is cu_seqlens
+    assert _zing_uniform_cu_seqlens(2, 7, torch.device("cpu")) is cu_seqlens
 
-    _minwm_uniform_frame_indices.cache_clear()
-    frame_indices = _minwm_uniform_frame_indices(6, 3, torch.device("cpu"))
+    _zing_uniform_frame_indices.cache_clear()
+    frame_indices = _zing_uniform_frame_indices(6, 3, torch.device("cpu"))
     assert frame_indices.tolist() == [0, 0, 1, 1, 2, 2]
-    assert _minwm_uniform_frame_indices(6, 3, torch.device("cpu")) is frame_indices
+    assert _zing_uniform_frame_indices(6, 3, torch.device("cpu")) is frame_indices
 
 
-def test_minwm_block_relative_rope_clamps_visible_frame_gaps():
-    cache = _make_minwm_test_cache(
+def test_zing_block_relative_rope_clamps_visible_frame_gaps():
+    cache = _make_zing_test_cache(
         cache_size=6,
         sink_tokens=1,
         rope_position_mode="block_relative",
@@ -643,17 +642,17 @@ def test_minwm_block_relative_rope_clamps_visible_frame_gaps():
     )
     view = None
     for token_start, frame in enumerate([0, 1, 2, 10, 11, 12, 13, 14]):
-        view = _append_minwm_test_frames(cache, [frame], token_start=token_start)
+        view = _append_zing_test_frames(cache, [frame], token_start=token_start)
     assert cache.position_ids[:, 0].tolist() == [0, 10, 11, 12, 13, 14]
     assert view.key_position_ids[:, 0].tolist() == [0, 3, 4, 5, 6, 7]
     assert view.query_position_ids[:, 0].tolist() == [7]
 
 
 @pytest.mark.parametrize("rope_max_frame_gap", [11, 12])
-def test_minwm_cuda_graph_refreshes_block_relative_rope_after_window_roll(
+def test_zing_cuda_graph_refreshes_block_relative_rope_after_window_roll(
     rope_max_frame_gap,
 ):
-    cache = _make_minwm_test_cache(
+    cache = _make_zing_test_cache(
         cache_size=6,
         sink_tokens=1,
         rope_position_mode="block_relative",
@@ -662,7 +661,7 @@ def test_minwm_cuda_graph_refreshes_block_relative_rope_after_window_roll(
 
     def append_chunk(token_start):
         frames = [token_start, token_start + 1]
-        _append_minwm_test_frames(cache, frames, token_start=token_start)
+        _append_zing_test_frames(cache, frames, token_start=token_start)
         position_ids = torch.tensor(
             [[frames[0], 0, 0], [frames[1], 0, 0]], dtype=torch.long
         )
@@ -699,7 +698,7 @@ def test_minwm_cuda_graph_refreshes_block_relative_rope_after_window_roll(
         captured
     ) == _cuda_graph_attention_plan_signature(current)
 
-    runner = _MinWMCudaGraphRunner(key=())
+    runner = _ZingCudaGraphRunner(key=())
     runner.capture_dependencies = static_plan
     runner._copy_attention_plan_inputs(current)
 
@@ -716,8 +715,8 @@ def test_minwm_cuda_graph_refreshes_block_relative_rope_after_window_roll(
         )
 
 
-def test_minwm_cuda_graph_replay_refreshes_chunk_action_residual():
-    runner = _MinWMCudaGraphRunner(key=())
+def test_zing_cuda_graph_replay_refreshes_chunk_action_residual():
+    runner = _ZingCudaGraphRunner(key=())
     runner.static_latent = torch.zeros(1, 2)
     runner.static_prompt = torch.zeros(1, 3)
     runner.static_timestep = torch.zeros(1, dtype=torch.long)
@@ -744,40 +743,40 @@ def test_minwm_cuda_graph_replay_refreshes_chunk_action_residual():
     assert len(replays) == 2
 
 
-def test_minwm_prompt_first_frame_promotes_only_when_leaving_tail():
-    cache = _make_minwm_test_cache(
+def test_zing_prompt_first_frame_promotes_only_when_leaving_tail():
+    cache = _make_zing_test_cache(
         cache_size=6,
         sink_tokens=1,
         rope_position_mode="block_relative",
         prompt_first_frame_pin_enabled=True,
     )
-    _append_minwm_test_frames(cache, [0, 1], token_start=0)
+    _append_zing_test_frames(cache, [0, 1], token_start=0)
     cache.mark_prompt_switch()
-    _append_minwm_test_frames(cache, [2], token_start=2)
+    _append_zing_test_frames(cache, [2], token_start=2)
     for frame in (3, 4, 5, 6):
-        _append_minwm_test_frames(cache, [frame], token_start=frame)
+        _append_zing_test_frames(cache, [frame], token_start=frame)
     assert cache.token_ids.tolist() == [0, 2, 3, 4, 5, 6]
     assert cache.pinned_token_start is None
-    _append_minwm_test_frames(cache, [7], token_start=7)
+    _append_zing_test_frames(cache, [7], token_start=7)
     assert cache.token_ids.tolist() == [0, 2, 4, 5, 6, 7]
     assert (cache.pinned_token_start, cache.pinned_token_end) == (2, 3)
 
 
-def test_minwm_scene_cut_updates_absolute_rope_and_pins_sink_prefix():
-    cache = _make_minwm_test_cache(
+def test_zing_scene_cut_updates_absolute_rope_and_pins_sink_prefix():
+    cache = _make_zing_test_cache(
         cache_size=6,
         sink_tokens=2,
         scene_cut_rope_offset=11,
         scene_cut_sink_enabled=True,
     )
-    _append_minwm_test_frames(cache, [0, 1], token_start=0)
+    _append_zing_test_frames(cache, [0, 1], token_start=0)
     cache.mark_scene_cut()
-    view = _append_minwm_test_frames(cache, [2, 3, 4], token_start=2)
+    view = _append_zing_test_frames(cache, [2, 3, 4], token_start=2)
     assert view.query_position_ids[:, 0].tolist() == [13, 14, 15]
     assert (cache.pinned_token_start, cache.pinned_token_end) == (2, 4)
 
 
-def test_minwm_action_history_chunk_matches_full_sequence():
+def test_zing_action_history_chunk_matches_full_sequence():
     torch.manual_seed(7)
     encoder = PrimitiveTokenResidualActionEncoder(
         dim=24, embed_dim=8, hidden_dim=16, kernel_size=3
@@ -803,7 +802,7 @@ def test_minwm_action_history_chunk_matches_full_sequence():
     "encoder_cls",
     [PrimitiveTokenResidualActionEncoder, PrimitiveRoPETokenResidualActionEncoder],
 )
-def test_minwm_action_encoders_do_not_validate_device_weights(encoder_cls):
+def test_zing_action_encoders_do_not_validate_device_weights(encoder_cls):
     encoder = encoder_cls(dim=24, embed_dim=8, hidden_dim=16, kernel_size=3)
     invalid_weights = torch.full((1, 4, 1, 8), 2.0)
 
@@ -816,9 +815,9 @@ def test_minwm_action_encoders_do_not_validate_device_weights(encoder_cls):
     assert residual.shape == (1, 24, 24)
 
 
-def test_minwm_legacy_action_condition_recomputes_for_all_five_forwards(monkeypatch):
+def test_zing_legacy_action_condition_recomputes_for_all_five_forwards(monkeypatch):
     torch.manual_seed(19)
-    model = MinWMCausalTransformer3DModel.__new__(MinWMCausalTransformer3DModel)
+    model = ZingCausalTransformer3DModel.__new__(ZingCausalTransformer3DModel)
     torch.nn.Module.__init__(model)
     model.action_in = PrimitiveTokenResidualActionEncoder(
         dim=24, embed_dim=8, hidden_dim=16, kernel_size=3
@@ -852,11 +851,11 @@ def test_minwm_legacy_action_condition_recomputes_for_all_five_forwards(monkeypa
         torch.testing.assert_close(output, outputs[0], rtol=0, atol=0)
 
 
-def test_minwm_precomputed_action_residual_is_exactly_reused_for_five_forwards(
+def test_zing_precomputed_action_residual_is_exactly_reused_for_five_forwards(
     monkeypatch,
 ):
     torch.manual_seed(23)
-    model = MinWMCausalTransformer3DModel.__new__(MinWMCausalTransformer3DModel)
+    model = ZingCausalTransformer3DModel.__new__(ZingCausalTransformer3DModel)
     torch.nn.Module.__init__(model)
     model.action_in = PrimitiveTokenResidualActionEncoder(
         dim=24, embed_dim=8, hidden_dim=16, kernel_size=3
@@ -906,7 +905,7 @@ def test_minwm_precomputed_action_residual_is_exactly_reused_for_five_forwards(
         torch.testing.assert_close(output, legacy, rtol=0, atol=0)
 
 
-def test_minwm_action_residual_is_recomputed_for_each_chunk():
+def test_zing_action_residual_is_recomputed_for_each_chunk():
     calls = []
 
     class Transformer:
@@ -920,7 +919,7 @@ def test_minwm_action_residual_is_recomputed_for_each_chunk():
                 dtype=kwargs["dtype"],
             )
 
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage.transformer = Transformer()
 
     def context(action):
@@ -953,7 +952,7 @@ def test_minwm_action_residual_is_recomputed_for_each_chunk():
     assert torch.all(second == 2)
 
 
-def test_minwm_action_residual_prepare_nvtx_range_is_gated_and_unique(monkeypatch):
+def test_zing_action_residual_prepare_nvtx_range_is_gated_and_unique(monkeypatch):
     from sglang.multimodal_gen.runtime.utils import nvtx_pytorch_hooks
 
     pushes = []
@@ -968,7 +967,7 @@ def test_minwm_action_residual_prepare_nvtx_range_is_gated_and_unique(monkeypatc
         def prepare_action_token_residual(_action, **_kwargs):
             return torch.zeros(1)
 
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage.transformer = Transformer()
     context = SimpleNamespace(
         target_dtype=torch.bfloat16,
@@ -985,12 +984,12 @@ def test_minwm_action_residual_prepare_nvtx_range_is_gated_and_unique(monkeypatc
     stage._current_use_nvtx = False
     stage._prepare_chunk_action_token_residual(context)
 
-    assert pushes == [MINWM_ACTION_RESIDUAL_PREPARE_NVTX_RANGE] * 2
+    assert pushes == [ZING_ACTION_RESIDUAL_PREPARE_NVTX_RANGE] * 2
     assert pops == [None] * 2
 
 
-def test_minwm_forward_impl_prepares_action_residual_once_per_chunk():
-    source = inspect.getsource(MinWMCausalDMDDenoisingStage._forward_impl)
+def test_zing_forward_impl_prepares_action_residual_once_per_chunk():
+    source = inspect.getsource(ZingCausalDMDDenoisingStage._forward_impl)
 
     assert source.count("self._prepare_chunk_action_token_residual(ctx)") == 1
     assert source.index(
@@ -998,7 +997,7 @@ def test_minwm_forward_impl_prepares_action_residual_once_per_chunk():
     ) < source.index("self._denoise_realtime_causal_chunk(")
 
 
-def test_minwm_bounded_session_presamples_reference_and_full_horizon(monkeypatch):
+def test_zing_bounded_session_presamples_reference_and_full_horizon(monkeypatch):
     import sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing.zing_causal_denoising as stage_module
 
     monkeypatch.setattr(
@@ -1007,7 +1006,7 @@ def test_minwm_bounded_session_presamples_reference_and_full_horizon(monkeypatch
     transformer = SimpleNamespace(
         config=SimpleNamespace(num_frames_per_block=4, out_channels=2)
     )
-    stage = MinWMChunkLatentPreparationStage(transformer)
+    stage = ZingChunkLatentPreparationStage(transformer)
     session = RealtimeSession()
     generator = torch.Generator().manual_seed(123)
     condition = torch.zeros(1, 2, 1, 1, 3)
@@ -1025,7 +1024,7 @@ def test_minwm_bounded_session_presamples_reference_and_full_horizon(monkeypatch
             generator=generator,
             session=session,
             block_idx=block_idx,
-            condition_inputs={MINWM_TOTAL_CHUNKS_CONDITION: 2},
+            condition_inputs={ZING_TOTAL_CHUNKS_CONDITION: 2},
             raw_latent_shape=None,
         )
 
@@ -1046,8 +1045,8 @@ def test_minwm_bounded_session_presamples_reference_and_full_horizon(monkeypatch
     assert torch.equal(generator.get_state(), expected_generator.get_state())
 
 
-def test_minwm_t2v_uses_first_regular_and_remainder_chunk_sizes():
-    adapter = MinWMRealtimeAdapter()
+def test_zing_t2v_uses_first_regular_and_remainder_chunk_sizes():
+    adapter = ZingRealtimeAdapter()
     session = SimpleNamespace(request=SimpleNamespace(first_frame=None, num_frames=725))
     server_args = SimpleNamespace(
         pipeline_config=SimpleNamespace(
@@ -1072,7 +1071,7 @@ def test_minwm_t2v_uses_first_regular_and_remainder_chunk_sizes():
     assert adapter.get_chunk_size(session, server_args, SimpleNamespace(index=0)) == 4
 
 
-def test_minwm_t2v_presamples_exact_horizon_without_reference_slot(monkeypatch):
+def test_zing_t2v_presamples_exact_horizon_without_reference_slot(monkeypatch):
     import sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing.zing_causal_denoising as stage_module
 
     monkeypatch.setattr(
@@ -1085,7 +1084,7 @@ def test_minwm_t2v_presamples_exact_horizon_without_reference_slot(monkeypatch):
             out_channels=2,
         )
     )
-    stage = MinWMChunkLatentPreparationStage(transformer)
+    stage = ZingChunkLatentPreparationStage(transformer)
     session = RealtimeSession()
     generator = torch.Generator().manual_seed(123)
     server_args = SimpleNamespace(
@@ -1110,8 +1109,8 @@ def test_minwm_t2v_presamples_exact_horizon_without_reference_slot(monkeypatch):
             session=session,
             block_idx=block_idx,
             condition_inputs={
-                MINWM_TOTAL_CHUNKS_CONDITION: 3,
-                MINWM_TOTAL_LATENT_FRAMES_CONDITION: 6,
+                ZING_TOTAL_CHUNKS_CONDITION: 3,
+                ZING_TOTAL_LATENT_FRAMES_CONDITION: 6,
             },
             raw_latent_shape=None,
             height=16,
@@ -1133,7 +1132,7 @@ def test_minwm_t2v_presamples_exact_horizon_without_reference_slot(monkeypatch):
     assert torch.equal(generator.get_state(), expected_generator.get_state())
 
 
-def test_minwm_director_chunk_seed_replays_prefix_rng_before_tail(monkeypatch):
+def test_zing_director_chunk_seed_replays_prefix_rng_before_tail(monkeypatch):
     import sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing.zing_causal_denoising as stage_module
 
     monkeypatch.setattr(
@@ -1142,7 +1141,7 @@ def test_minwm_director_chunk_seed_replays_prefix_rng_before_tail(monkeypatch):
     transformer = SimpleNamespace(
         config=SimpleNamespace(num_frames_per_block=4, out_channels=2)
     )
-    stage = MinWMChunkLatentPreparationStage(transformer)
+    stage = ZingChunkLatentPreparationStage(transformer)
     prefix_frames = 5
     chunk_frames = 4
     seed = 729003
@@ -1154,8 +1153,8 @@ def test_minwm_director_chunk_seed_replays_prefix_rng_before_tail(monkeypatch):
         session=RealtimeSession(),
         block_idx=2,
         condition_inputs={
-            MINWM_CHUNK_SEED_CONDITION: seed,
-            MINWM_CHUNK_SEED_PREFIX_FRAMES_CONDITION: prefix_frames,
+            ZING_CHUNK_SEED_CONDITION: seed,
+            ZING_CHUNK_SEED_PREFIX_FRAMES_CONDITION: prefix_frames,
         },
         raw_latent_shape=None,
         height=16,
@@ -1184,8 +1183,8 @@ def test_minwm_director_chunk_seed_replays_prefix_rng_before_tail(monkeypatch):
     )
 
 
-def test_minwm_default_kv_horizon_retains_complete_bounded_session():
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+def test_zing_default_kv_horizon_retains_complete_bounded_session():
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage.transformer = SimpleNamespace(
         config=SimpleNamespace(
             sink_size=0,
@@ -1199,7 +1198,7 @@ def test_minwm_default_kv_horizon_retains_complete_bounded_session():
     batch = SimpleNamespace(
         realtime_causal_sink_size=None,
         realtime_causal_kv_cache_num_frames=None,
-        condition_inputs={MINWM_TOTAL_CHUNKS_CONDITION: 8},
+        condition_inputs={ZING_TOTAL_CHUNKS_CONDITION: 8},
         image_latent=torch.empty(1),
     )
     pipeline_config = SimpleNamespace(
@@ -1214,7 +1213,7 @@ def test_minwm_default_kv_horizon_retains_complete_bounded_session():
         ),
     )
     assert stage.sliding_window_num_frames == 33
-    assert stage._minwm_unbounded_cache is True
+    assert stage._zing_unbounded_cache is True
 
     batch.realtime_causal_kv_cache_num_frames = 45
     stage._apply_causal_cache_overrides(
@@ -1225,11 +1224,11 @@ def test_minwm_default_kv_horizon_retains_complete_bounded_session():
         ),
     )
     assert stage.sliding_window_num_frames == 45
-    assert stage._minwm_unbounded_cache is False
+    assert stage._zing_unbounded_cache is False
 
 
-def test_minwm_causal_cache_overrides_do_not_leak_between_requests():
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+def test_zing_causal_cache_overrides_do_not_leak_between_requests():
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage.transformer = SimpleNamespace(
         config=SimpleNamespace(
             sink_size=0,
@@ -1252,28 +1251,28 @@ def test_minwm_causal_cache_overrides_do_not_leak_between_requests():
     bounded_request = SimpleNamespace(
         realtime_causal_sink_size=9,
         realtime_causal_kv_cache_num_frames=18,
-        condition_inputs={MINWM_TOTAL_CHUNKS_CONDITION: 8},
+        condition_inputs={ZING_TOTAL_CHUNKS_CONDITION: 8},
         image_latent=torch.empty(1),
     )
     stage._apply_causal_cache_overrides(bounded_request, server_args)
     assert stage.sink_size == 9
     assert stage.sliding_window_num_frames == 18
-    assert stage._minwm_unbounded_cache is False
+    assert stage._zing_unbounded_cache is False
 
     default_request = SimpleNamespace(
         realtime_causal_sink_size=None,
         realtime_causal_kv_cache_num_frames=None,
-        condition_inputs={MINWM_TOTAL_CHUNKS_CONDITION: 8},
+        condition_inputs={ZING_TOTAL_CHUNKS_CONDITION: 8},
         image_latent=torch.empty(1),
     )
     stage._apply_causal_cache_overrides(default_request, server_args)
     assert stage.sink_size == 0
     assert stage.sliding_window_num_frames == 33
-    assert stage._minwm_unbounded_cache is True
+    assert stage._zing_unbounded_cache is True
 
 
-def test_minwm_t2v_default_kv_horizon_uses_exact_latent_count():
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+def test_zing_t2v_default_kv_horizon_uses_exact_latent_count():
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage.transformer = SimpleNamespace(
         config=SimpleNamespace(
             sink_size=0,
@@ -1288,7 +1287,7 @@ def test_minwm_t2v_default_kv_horizon_uses_exact_latent_count():
     batch = SimpleNamespace(
         realtime_causal_sink_size=None,
         realtime_causal_kv_cache_num_frames=None,
-        condition_inputs={MINWM_TOTAL_LATENT_FRAMES_CONDITION: 182},
+        condition_inputs={ZING_TOTAL_LATENT_FRAMES_CONDITION: 182},
         image_latent=None,
     )
     pipeline_config = SimpleNamespace(
@@ -1305,11 +1304,11 @@ def test_minwm_t2v_default_kv_horizon_uses_exact_latent_count():
     )
 
     assert stage.sliding_window_num_frames == 182
-    assert stage._minwm_unbounded_cache is True
+    assert stage._zing_unbounded_cache is True
 
 
-def test_minwm_model_bounded_window_is_not_expanded_to_request_horizon():
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+def test_zing_model_bounded_window_is_not_expanded_to_request_horizon():
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage.transformer = SimpleNamespace(
         config=SimpleNamespace(
             sink_size=8,
@@ -1323,7 +1322,7 @@ def test_minwm_model_bounded_window_is_not_expanded_to_request_horizon():
     batch = SimpleNamespace(
         realtime_causal_sink_size=None,
         realtime_causal_kv_cache_num_frames=None,
-        condition_inputs={MINWM_TOTAL_LATENT_FRAMES_CONDITION: 273},
+        condition_inputs={ZING_TOTAL_LATENT_FRAMES_CONDITION: 273},
         image_latent=None,
     )
     pipeline_config = SimpleNamespace(
@@ -1339,10 +1338,10 @@ def test_minwm_model_bounded_window_is_not_expanded_to_request_horizon():
     )
     assert stage.sliding_window_num_frames == 32
     assert stage.sink_size == 8
-    assert stage._minwm_unbounded_cache is False
+    assert stage._zing_unbounded_cache is False
 
 
-def test_minwm_t2v_decoder_does_not_prepend_a_reference(monkeypatch):
+def test_zing_t2v_decoder_does_not_prepend_a_reference(monkeypatch):
     seen = []
 
     def fake_forward(_self, batch, _server_args):
@@ -1350,7 +1349,7 @@ def test_minwm_t2v_decoder_does_not_prepend_a_reference(monkeypatch):
         return batch.latents
 
     monkeypatch.setattr(CausalVaeDecodingStage, "forward", fake_forward)
-    stage = MinWMCausalVaeDecodingStage.__new__(MinWMCausalVaeDecodingStage)
+    stage = ZingCausalVaeDecodingStage.__new__(ZingCausalVaeDecodingStage)
     generated = torch.ones(1, 2, 1, 1, 1)
     t2v_batch = SimpleNamespace(
         block_idx=0,
@@ -1372,7 +1371,7 @@ def test_minwm_t2v_decoder_does_not_prepend_a_reference(monkeypatch):
     assert i2v_batch.latents is generated
 
 
-def test_minwm_t2v_decoder_reseeds_one_latent_first_block(monkeypatch):
+def test_zing_t2v_decoder_reseeds_one_latent_first_block(monkeypatch):
     seen = []
 
     def fake_forward(_self, batch, _server_args):
@@ -1383,7 +1382,7 @@ def test_minwm_t2v_decoder_reseeds_one_latent_first_block(monkeypatch):
         )
 
     monkeypatch.setattr(CausalVaeDecodingStage, "forward", fake_forward)
-    stage = MinWMCausalVaeDecodingStage.__new__(MinWMCausalVaeDecodingStage)
+    stage = ZingCausalVaeDecodingStage.__new__(ZingCausalVaeDecodingStage)
     session = RealtimeSession()
     first_latent = torch.full((1, 2, 1, 1, 1), 1.0)
     regular_latents = torch.full((1, 2, 4, 1, 1), 2.0)
@@ -1417,8 +1416,8 @@ def test_minwm_t2v_decoder_reseeds_one_latent_first_block(monkeypatch):
     assert regular_batch.latents is regular_latents
 
 
-def test_minwm_unbounded_kv_policy_reaches_cache_allocation():
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+def test_zing_unbounded_kv_policy_reaches_cache_allocation():
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage.num_transformer_blocks = 2
     stage.num_token_per_frame = 3
     stage.sliding_window_num_frames = 5
@@ -1441,10 +1440,10 @@ def test_minwm_unbounded_kv_policy_reaches_cache_allocation():
     assert stage.causal_kv_cache[0].k.shape == (1, 15, 2, 4)
 
 
-def _minwm_cuda_graph_cache_stage(*, allow_growth, rope_position_mode):
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
-    stage._minwm_cuda_graph_enabled = True
-    stage._minwm_unbounded_cache = allow_growth
+def _zing_cuda_graph_cache_stage(*, allow_growth, rope_position_mode):
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
+    stage._zing_cuda_graph_enabled = True
+    stage._zing_unbounded_cache = allow_growth
     stage.transformer = SimpleNamespace(
         config=SimpleNamespace(
             rope_position_mode=rope_position_mode,
@@ -1457,8 +1456,8 @@ def _minwm_cuda_graph_cache_stage(*, allow_growth, rope_position_mode):
     return stage
 
 
-def test_minwm_cuda_graph_accepts_bounded_block_relative_cache():
-    stage = _minwm_cuda_graph_cache_stage(
+def test_zing_cuda_graph_accepts_bounded_block_relative_cache():
+    stage = _zing_cuda_graph_cache_stage(
         allow_growth=False,
         rope_position_mode="block_relative",
     )
@@ -1470,7 +1469,7 @@ def test_minwm_cuda_graph_accepts_bounded_block_relative_cache():
     assert kwargs["rope_position_mode"] == "block_relative"
 
 
-def test_minwm_cuda_graph_key_separates_both_720p_shapes():
+def test_zing_cuda_graph_key_separates_both_720p_shapes():
     class FakeCudaTensor:
         is_cuda = True
         dtype = torch.bfloat16
@@ -1487,13 +1486,13 @@ def test_minwm_cuda_graph_key_separates_both_720p_shapes():
                 stride *= dimension
             return tuple(reversed(strides))
 
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
-    stage._minwm_cuda_graph_enabled = True
-    cache = _make_minwm_test_cache(
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
+    stage._zing_cuda_graph_enabled = True
+    cache = _make_zing_test_cache(
         cache_size=6,
         rope_position_mode="block_relative",
     )
-    _append_minwm_test_frames(cache, range(6), token_start=0)
+    _append_zing_test_frames(cache, range(6), token_start=0)
     cache.rotated_k = torch.empty_like(cache.k)
     crossattn_cache = SimpleNamespace(
         k=torch.zeros(1, 2, 1, 2),
@@ -1514,11 +1513,11 @@ def test_minwm_cuda_graph_key_separates_both_720p_shapes():
         "attn_metadata": None,
     }
 
-    key_1248 = stage._minwm_cuda_graph_key(
+    key_1248 = stage._zing_cuda_graph_key(
         latent_model_input=FakeCudaTensor((1, 48, 4, 44, 78)),
         **common,
     )
-    key_1280 = stage._minwm_cuda_graph_key(
+    key_1280 = stage._zing_cuda_graph_key(
         latent_model_input=FakeCudaTensor((1, 48, 4, 44, 80)),
         **common,
     )
@@ -1528,7 +1527,7 @@ def test_minwm_cuda_graph_key_separates_both_720p_shapes():
     assert key_1248 != key_1280
 
 
-def test_minwm_sequence_shard_forward_bypasses_cuda_graph(monkeypatch):
+def test_zing_sequence_shard_forward_bypasses_cuda_graph(monkeypatch):
     from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing import (
         zing_causal_denoising as denoising_module,
     )
@@ -1550,14 +1549,14 @@ def test_minwm_sequence_shard_forward_bypasses_cuda_graph(monkeypatch):
             self.graph = object()
 
         def run(self, **_kwargs):
-            pytest.fail("sequence-sharded MinWM must not replay a CUDA graph")
+            pytest.fail("sequence-sharded Zing must not replay a CUDA graph")
 
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage.transformer = Transformer()
-    stage._minwm_cuda_graph_runner = None
-    stage._minwm_cuda_graph_key = lambda **_kwargs: ("captured",)
+    stage._zing_cuda_graph_runner = None
+    stage._zing_cuda_graph_key = lambda **_kwargs: ("captured",)
     stage._causal_sequence_shard_enabled = lambda _batch: True
-    monkeypatch.setattr(denoising_module, "_MinWMCudaGraphRunner", RejectGraphRunner)
+    monkeypatch.setattr(denoising_module, "_ZingCudaGraphRunner", RejectGraphRunner)
 
     latent = torch.zeros(1, 2, 4, 3, 3)
     result = stage._forward_causal_transformer_impl(
@@ -1588,10 +1587,10 @@ def test_minwm_sequence_shard_forward_bypasses_cuda_graph(monkeypatch):
         (False, "absolute", "block_relative RoPE"),
     ],
 )
-def test_minwm_cuda_graph_rejects_dynamic_cache_contracts(
+def test_zing_cuda_graph_rejects_dynamic_cache_contracts(
     allow_growth, rope_position_mode, message
 ):
-    stage = _minwm_cuda_graph_cache_stage(
+    stage = _zing_cuda_graph_cache_stage(
         allow_growth=allow_growth,
         rope_position_mode=rope_position_mode,
     )
@@ -1602,25 +1601,25 @@ def test_minwm_cuda_graph_rejects_dynamic_cache_contracts(
         )
 
 
-def test_minwm_unipc_scheduler_matches_native_shift_contract():
-    pipeline = MinWMCausalUniPCPipeline.__new__(MinWMCausalUniPCPipeline)
+def test_zing_unipc_scheduler_matches_native_shift_contract():
+    pipeline = ZingCausalUniPCPipeline.__new__(ZingCausalUniPCPipeline)
     pipeline.modules = {}
     pipeline.initialize_pipeline(
         SimpleNamespace(pipeline_config=SimpleNamespace(flow_shift=5.0))
     )
     scheduler = pipeline.modules["scheduler"]
 
-    assert scheduler.__class__.__name__ == "MinWMFlowUniPCParityScheduler"
+    assert scheduler.__class__.__name__ == "ZingFlowUniPCParityScheduler"
     assert scheduler.config.shift == 1.0
     scheduler.set_timesteps(4, device="cpu", shift=5.0)
     assert scheduler.sigmas.device.type == "cpu"
-    # This is the exact NumPy FP64 schedule produced by minWM 4220c8a from
+    # This is the exact NumPy FP64 schedule produced by Zing 4220c8a from
     # its FP32 sigma bounds. The previous 936/832 expectation was stale.
     assert scheduler.timesteps.tolist() == [999, 937, 833, 624]
 
 
-def test_minwm_unipc_stage_steps_in_native_bfchw_layout():
-    stage = MinWMCausalUniPCDenoisingStage.__new__(MinWMCausalUniPCDenoisingStage)
+def test_zing_unipc_stage_steps_in_native_bfchw_layout():
+    stage = ZingCausalUniPCDenoisingStage.__new__(ZingCausalUniPCDenoisingStage)
     stage._build_causal_attn_metadata = lambda *args, **kwargs: None
     transformer_inputs = []
 
@@ -1668,15 +1667,15 @@ def test_minwm_unipc_stage_steps_in_native_bfchw_layout():
     assert metadata is None
 
 
-def test_minwm_t2v_starts_fractional_actions_without_reference_history():
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+def test_zing_t2v_starts_fractional_actions_without_reference_history():
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage.transformer = SimpleNamespace(config=SimpleNamespace(action_history_frames=4))
     window = [[0.8, 0, 0, 0, 0, 0, 0, 0]] * 4
     batch = SimpleNamespace(
         session=RealtimeSession(),
         block_idx=0,
         latents=torch.zeros(1, 2, 4, 1, 1),
-        condition_inputs={MINWM_ACTION_WEIGHTS_CONDITION: [window] * 4},
+        condition_inputs={ZING_ACTION_WEIGHTS_CONDITION: [window] * 4},
     )
     server_args = SimpleNamespace(
         pipeline_config=SimpleNamespace(
@@ -1694,8 +1693,8 @@ def test_minwm_t2v_starts_fractional_actions_without_reference_history():
     )
 
 
-def test_minwm_i2v_starts_fractional_actions_after_reference_history():
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+def test_zing_i2v_starts_fractional_actions_after_reference_history():
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage.transformer = SimpleNamespace(config=SimpleNamespace(action_history_frames=4))
     window = [[0.8, 0, 0, 0, 0, 0, 0, 0]] * 4
     batch = SimpleNamespace(
@@ -1703,7 +1702,7 @@ def test_minwm_i2v_starts_fractional_actions_after_reference_history():
         block_idx=0,
         latents=torch.zeros(1, 2, 4, 1, 1),
         image_latent=torch.zeros(1, 2, 1, 1, 1),
-        condition_inputs={MINWM_ACTION_WEIGHTS_CONDITION: [window] * 4},
+        condition_inputs={ZING_ACTION_WEIGHTS_CONDITION: [window] * 4},
     )
     server_args = SimpleNamespace(
         pipeline_config=SimpleNamespace(
@@ -1722,8 +1721,8 @@ def test_minwm_i2v_starts_fractional_actions_after_reference_history():
     )
 
 
-def test_minwm_realtime_adapter_groups_pixel_weights_by_vae_factor():
-    state = MinWMRealtimeState()
+def test_zing_realtime_adapter_groups_pixel_weights_by_vae_factor():
+    state = ZingRealtimeState()
     row = [0.8, 0, 0, 0, 0, 0, 0, 0]
     state.receive_action_weights([row] * 16)
     session = SimpleNamespace(
@@ -1742,21 +1741,21 @@ def test_minwm_realtime_adapter_groups_pixel_weights_by_vae_factor():
             )
         )
     )
-    inputs = MinWMRealtimeAdapter().sample_chunk_inputs(
+    inputs = ZingRealtimeAdapter().sample_chunk_inputs(
         session,
         server_args,
         SimpleNamespace(index=0),
         chunk_size=4,
     )
-    windows = inputs.condition_inputs[MINWM_ACTION_WEIGHTS_CONDITION]
+    windows = inputs.condition_inputs[ZING_ACTION_WEIGHTS_CONDITION]
     assert len(windows) == 4
     assert all(len(window) == 4 for window in windows)
     assert windows == [[row] * 4] * 4
-    assert inputs.condition_inputs[MINWM_TOTAL_CHUNKS_CONDITION] == 8
+    assert inputs.condition_inputs[ZING_TOTAL_CHUNKS_CONDITION] == 8
 
 
-def test_minwm_t2v_first_latent_is_noop_without_consuming_pixel_actions():
-    state = MinWMRealtimeState()
+def test_zing_t2v_first_latent_is_noop_without_consuming_pixel_actions():
+    state = ZingRealtimeState()
     first_action = [0.8, 0, 0, 0, 0, 0, 0, 0]
     state.receive_action_weights([first_action] * 16)
     session = SimpleNamespace(
@@ -1781,22 +1780,22 @@ def test_minwm_t2v_first_latent_is_noop_without_consuming_pixel_actions():
             ),
         )
     )
-    adapter = MinWMRealtimeAdapter()
+    adapter = ZingRealtimeAdapter()
     first = adapter.sample_chunk_inputs(
         session, server_args, SimpleNamespace(index=0), chunk_size=1
     )
-    assert first.condition_inputs[MINWM_ACTION_WEIGHTS_CONDITION] == [[[0.0] * 8] * 4]
+    assert first.condition_inputs[ZING_ACTION_WEIGHTS_CONDITION] == [[[0.0] * 8] * 4]
     second = adapter.sample_chunk_inputs(
         session, server_args, SimpleNamespace(index=1), chunk_size=4
     )
     assert (
-        second.condition_inputs[MINWM_ACTION_WEIGHTS_CONDITION]
+        second.condition_inputs[ZING_ACTION_WEIGHTS_CONDITION]
         == [[first_action] * 4] * 4
     )
 
 
-def test_minwm_scheduled_prompt_and_seed_target_exact_chunk():
-    state = MinWMRealtimeState()
+def test_zing_scheduled_prompt_and_seed_target_exact_chunk():
+    state = ZingRealtimeState()
     state.receive_prompt_schedule({3: ("night", "prompt")})
     state.receive_chunk_seeds([729001, 729002, 729003, 729004])
     session = SimpleNamespace(
@@ -1821,7 +1820,7 @@ def test_minwm_scheduled_prompt_and_seed_target_exact_chunk():
             ),
         )
     )
-    adapter = MinWMRealtimeAdapter()
+    adapter = ZingRealtimeAdapter()
     for chunk_index, expected_seed in enumerate(range(729001, 729005)):
         chunk_size = 1 if chunk_index == 0 else 4
         inputs = adapter.sample_chunk_inputs(
@@ -1830,29 +1829,29 @@ def test_minwm_scheduled_prompt_and_seed_target_exact_chunk():
             SimpleNamespace(index=chunk_index),
             chunk_size=chunk_size,
         )
-        assert inputs.condition_inputs[MINWM_CHUNK_SEED_CONDITION] == expected_seed
+        assert inputs.condition_inputs[ZING_CHUNK_SEED_CONDITION] == expected_seed
         expected_prefix = 0 if chunk_index == 0 else 1 + (chunk_index - 1) * 4
         assert (
-            inputs.condition_inputs[MINWM_CHUNK_SEED_PREFIX_FRAMES_CONDITION]
+            inputs.condition_inputs[ZING_CHUNK_SEED_PREFIX_FRAMES_CONDITION]
             == expected_prefix
         )
         if chunk_index == 3:
             assert inputs.prompt == "night"
-            assert inputs.condition_inputs[MINWM_PROMPT_UPDATED_CONDITION] is True
-            assert inputs.condition_inputs[MINWM_CONDITION_SWITCH_CONDITION] == "prompt"
+            assert inputs.condition_inputs[ZING_PROMPT_UPDATED_CONDITION] is True
+            assert inputs.condition_inputs[ZING_CONDITION_SWITCH_CONDITION] == "prompt"
         else:
             assert inputs.prompt == "day"
 
 
-def test_minwm_prompt_schedule_validation_accepts_scene_cut_kind():
-    assert MinWMRealtimeAdapter._validate_prompt_schedule(
+def test_zing_prompt_schedule_validation_accepts_scene_cut_kind():
+    assert ZingRealtimeAdapter._validate_prompt_schedule(
         [
             {"target_chunk": 2, "prompt": "snow", "kind": "scene_cut"},
             {"target_chunk": 5, "prompt": "night"},
         ]
     ) == {2: ("snow", "scene_cut"), 5: ("night", "prompt")}
     with pytest.raises(ValueError, match="duplicate"):
-        MinWMRealtimeAdapter._validate_prompt_schedule(
+        ZingRealtimeAdapter._validate_prompt_schedule(
             [
                 {"target_chunk": 2, "prompt": "snow"},
                 {"target_chunk": 2, "prompt": "night"},
@@ -1860,11 +1859,11 @@ def test_minwm_prompt_schedule_validation_accepts_scene_cut_kind():
         )
 
 
-def test_minwm_text_context_keeps_zero_padded_512_contract():
+def test_zing_text_context_keeps_zero_padded_512_contract():
     hidden = torch.randn(1, 1024, 8)
     attention_mask = torch.zeros(1, 1024, dtype=torch.long)
     attention_mask[:, :17] = 1
-    output = minwm_t5_postprocess_text(
+    output = zing_t5_postprocess_text(
         SimpleNamespace(last_hidden_state=hidden, attention_mask=attention_mask),
         None,
     )
@@ -1876,11 +1875,11 @@ def test_minwm_text_context_keeps_zero_padded_512_contract():
     assert torch.count_nonzero(output.prompt_embeds[:, 17:]).item() == 0
 
 
-def test_minwm_native_hf_text_output_uses_tokenizer_attention_mask():
+def test_zing_native_hf_text_output_uses_tokenizer_attention_mask():
     hidden = torch.randn(1, 1024, 8)
     attention_mask = torch.zeros(1, 1024, dtype=torch.long)
     attention_mask[:, :23] = 1
-    output = minwm_t5_postprocess_text(
+    output = zing_t5_postprocess_text(
         SimpleNamespace(last_hidden_state=hidden),
         {"attention_mask": attention_mask},
     )
@@ -1889,7 +1888,7 @@ def test_minwm_native_hf_text_output_uses_tokenizer_attention_mask():
     assert torch.count_nonzero(output.prompt_embeds[:, 23:]).item() == 0
 
 
-def test_minwm_tokenization_matches_main_dynamic_padding_contract():
+def test_zing_tokenization_matches_main_dynamic_padding_contract():
     calls = []
 
     class FakeTokenizer:
@@ -1902,7 +1901,7 @@ def test_minwm_tokenization_matches_main_dynamic_padding_contract():
                 "attention_mask": torch.ones(1, 3, dtype=torch.long),
             }
 
-    config = MinWMCausalDMDConfig()
+    config = ZingCausalDMDConfig()
     tokenizer = FakeTokenizer()
     tokens = config.tokenize_prompt(
         ["hello"], tokenizer, config.text_encoder_configs[0].tokenizer_kwargs
@@ -1916,42 +1915,42 @@ def test_minwm_tokenization_matches_main_dynamic_padding_contract():
     assert tokens["attention_mask"][0, 3:].eq(0).all()
 
 
-def test_minwm_requires_baseline_native_text_and_vae_components():
-    config = MinWMCausalDMDConfig()
+def test_zing_requires_baseline_native_text_and_vae_components():
+    config = ZingCausalDMDConfig()
     assert config.native_component_names == ("text_encoder", "vae")
     assert config.enable_autocast is False
 
 
-def test_minwm_explicit_parallel_vae_lane_uses_sglang_vae(monkeypatch):
+def test_zing_explicit_parallel_vae_lane_uses_sglang_vae(monkeypatch):
     monkeypatch.setenv("ZING_VAE_LANE", "parallel")
-    monkeypatch.setenv("MINWM_NATIVE_COMPONENTS", "text_encoder,vae")
+    monkeypatch.setenv("ZING_NATIVE_COMPONENTS", "text_encoder,vae")
 
-    config = MinWMCausalDMDConfig()
+    config = ZingCausalDMDConfig()
 
     assert config.native_component_names == ("text_encoder",)
     assert config.vae_config.use_parallel_encode is False
 
 
-def test_minwm_explicit_parity_vae_lane_uses_native_vae(monkeypatch):
+def test_zing_explicit_parity_vae_lane_uses_native_vae(monkeypatch):
     monkeypatch.setenv("ZING_VAE_LANE", "parity")
-    monkeypatch.setenv("MINWM_NATIVE_COMPONENTS", "")
+    monkeypatch.setenv("ZING_NATIVE_COMPONENTS", "")
 
-    config = MinWMCausalDMDConfig()
+    config = ZingCausalDMDConfig()
 
     assert config.native_component_names == ("text_encoder", "vae")
 
 
-def test_minwm_rejects_unknown_vae_lane(monkeypatch):
+def test_zing_rejects_unknown_vae_lane(monkeypatch):
     monkeypatch.setenv("ZING_VAE_LANE", "unknown")
 
     with pytest.raises(ValueError, match="ZING_VAE_LANE"):
-        MinWMCausalDMDConfig()
+        ZingCausalDMDConfig()
 
 
 def test_zing_public_pipeline_uses_online_runtime_defaults():
-    assert issubclass(ZingCausalDMDPipeline, MinWMCausalDMDPipeline)
-    assert "ZingCausalTransformer3DModel" in MinWMCausalTransformer3DModel._aliases
-    arch_config = MinWMVideoArchConfig()
+    assert ZingCausalDMDPipeline.pipeline_name == "ZingCausalDMDPipeline"
+    assert ZingCausalTransformer3DModel.__name__ == "ZingCausalTransformer3DModel"
+    arch_config = ZingVideoArchConfig()
     assert (arch_config.local_attn_size, arch_config.sink_size) == (32, 8)
     assert arch_config.sliding_window_num_frames == 32
     assert arch_config.rope_position_mode == "block_relative"
@@ -1959,24 +1958,24 @@ def test_zing_public_pipeline_uses_online_runtime_defaults():
     assert arch_config.prompt_first_frame_pin_enabled is True
 
 
-def test_minwm_non_proj_bias_is_loaded_from_transformer_config():
+def test_zing_non_proj_bias_is_loaded_from_transformer_config():
     transformer_config = {
         "action_type": "primitive_rope_token_residual",
         "action_non_proj_bias": False,
     }
-    model_config = MinWMVideoConfig()
+    model_config = ZingVideoConfig()
     model_config.update_model_arch(transformer_config)
 
     assert model_config.arch_config.action_non_proj_bias is False
-    assert MinWMVideoArchConfig().action_non_proj_bias is True
+    assert ZingVideoArchConfig().action_non_proj_bias is True
 
 
 @pytest.mark.parametrize("degree", [2, 4, 8])
-def test_minwm_accepts_supported_ulysses_sequence_parallelism(degree):
-    MinWMCausalDMDPipeline._validate_sequence_parallelism_args(
+def test_zing_accepts_supported_ulysses_sequence_parallelism(degree):
+    ZingCausalDMDPipeline._validate_sequence_parallelism_args(
         SimpleNamespace(sp_degree=1, ulysses_degree=1, ring_degree=1)
     )
-    MinWMCausalDMDPipeline._validate_sequence_parallelism_args(
+    ZingCausalDMDPipeline._validate_sequence_parallelism_args(
         SimpleNamespace(
             sp_degree=degree,
             ulysses_degree=degree,
@@ -2025,42 +2024,42 @@ def test_minwm_accepts_supported_ulysses_sequence_parallelism(degree):
         ),
     ],
 )
-def test_minwm_rejects_unsupported_parallelism_combinations(args, message):
+def test_zing_rejects_unsupported_parallelism_combinations(args, message):
     with pytest.raises(ValueError, match=message):
-        MinWMCausalDMDPipeline._validate_sequence_parallelism_args(args)
+        ZingCausalDMDPipeline._validate_sequence_parallelism_args(args)
 
 
-def test_minwm_sp_request_cannot_disable_sequence_sharding(monkeypatch):
+def test_zing_sp_request_cannot_disable_sequence_sharding(monkeypatch):
     monkeypatch.setattr(
-        MinWMSamplingParams.__mro__[1],
+        ZingSamplingParams.__mro__[1],
         "_adjust",
         lambda _self, _server_args: None,
     )
-    params = MinWMSamplingParams(enable_sequence_shard=False)
+    params = ZingSamplingParams(enable_sequence_shard=False)
     with pytest.raises(ValueError, match="requires enable_sequence_shard=True"):
         params._adjust(SimpleNamespace(sp_degree=2))
 
 
-def test_minwm_sp_request_enables_sequence_sharding(monkeypatch):
+def test_zing_sp_request_enables_sequence_sharding(monkeypatch):
     monkeypatch.setattr(
-        MinWMSamplingParams.__mro__[1],
+        ZingSamplingParams.__mro__[1],
         "_adjust",
         lambda _self, _server_args: None,
     )
-    params = MinWMSamplingParams(enable_sequence_shard=None)
+    params = ZingSamplingParams(enable_sequence_shard=None)
     params._adjust(SimpleNamespace(sp_degree=4))
     assert params.enable_sequence_shard is True
     assert params.adjust_frames is False
 
 
 @pytest.mark.parametrize("width", [1248, 1280])
-def test_minwm_sampling_accepts_both_720p_profile_resolutions(monkeypatch, width):
+def test_zing_sampling_accepts_both_720p_profile_resolutions(monkeypatch, width):
     monkeypatch.setattr(
-        MinWMSamplingParams.__mro__[1],
+        ZingSamplingParams.__mro__[1],
         "_adjust",
         lambda _self, _server_args: None,
     )
-    params = MinWMSamplingParams(width=width, height=704)
+    params = ZingSamplingParams(width=width, height=704)
     params._adjust(
         SimpleNamespace(
             sp_degree=1,
@@ -2078,13 +2077,13 @@ def test_minwm_sampling_accepts_both_720p_profile_resolutions(monkeypatch, width
 
 
 @pytest.mark.parametrize("width", [1248, 1280])
-def test_minwm_5090_profile_rejects_720p_before_pipeline_work(monkeypatch, width):
+def test_zing_5090_profile_rejects_720p_before_pipeline_work(monkeypatch, width):
     monkeypatch.setattr(
-        MinWMSamplingParams.__mro__[1],
+        ZingSamplingParams.__mro__[1],
         "_adjust",
         lambda _self, _server_args: None,
     )
-    params = MinWMSamplingParams(width=width, height=704)
+    params = ZingSamplingParams(width=width, height=704)
 
     with pytest.raises(ValueError, match="not enabled by the launch profile"):
         params._adjust(
@@ -2097,26 +2096,26 @@ def test_minwm_5090_profile_rejects_720p_before_pipeline_work(monkeypatch, width
         )
 
 
-def test_minwm_sequence_shard_frame_indices_support_mid_frame_boundaries(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
+def test_zing_sequence_shard_frame_indices_support_mid_frame_boundaries(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.zing as zing_module
 
     forward_batch = SimpleNamespace(
         enable_sequence_shard=True,
         sequence_shard_frame_indices=torch.tensor([1, 1, 2]),
     )
     monkeypatch.setattr(
-        minwm_module,
+        zing_module,
         "get_forward_context",
         lambda: SimpleNamespace(forward_batch=forward_batch),
     )
-    monkeypatch.setattr(minwm_module, "get_ulysses_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(zing_module, "get_ulysses_parallel_world_size", lambda: 2)
 
     hidden_states = torch.zeros(1, 3, 8)
-    assert _minwm_frame_indices(hidden_states, 4).tolist() == [1, 1, 2]
-    assert _minwm_frame_indices(hidden_states, 1).tolist() == [0, 0, 0]
+    assert _zing_frame_indices(hidden_states, 4).tolist() == [1, 1, 2]
+    assert _zing_frame_indices(hidden_states, 1).tolist() == [0, 0, 0]
 
 
-def test_minwm_sequence_shard_rope_uses_flattened_token_positions():
+def test_zing_sequence_shard_rope_uses_flattened_token_positions():
     class CaptureRotaryEmbedding(torch.nn.Module):
         def __init__(self):
             super().__init__()
@@ -2126,7 +2125,7 @@ def test_minwm_sequence_shard_rope_uses_flattened_token_positions():
             self.positions = positions
             return positions.float(), -positions.float()
 
-    model = MinWMCausalTransformer3DModel.__new__(MinWMCausalTransformer3DModel)
+    model = ZingCausalTransformer3DModel.__new__(ZingCausalTransformer3DModel)
     torch.nn.Module.__init__(model)
     model._sequence_shard_rotary_emb = CaptureRotaryEmbedding()
 
@@ -2158,7 +2157,7 @@ def test_minwm_sequence_shard_rope_uses_flattened_token_positions():
 
 
 @pytest.mark.parametrize("rank", range(3))
-def test_minwm_output_projection_restores_reference_row_bucket(rank):
+def test_zing_output_projection_restores_reference_row_bucket(rank):
     class CaptureProjection(torch.nn.Module):
         def __init__(self):
             super().__init__()
@@ -2175,7 +2174,7 @@ def test_minwm_output_projection_restores_reference_row_bucket(rank):
         dtype=torch.float32,
     ).reshape(1, seq_splits[rank], 2)
 
-    output = _minwm_project_output_in_reference_row_bucket(
+    output = _zing_project_output_in_reference_row_bucket(
         projection,
         hidden_states,
         seq_splits,
@@ -2189,9 +2188,9 @@ def test_minwm_output_projection_restores_reference_row_bucket(rank):
     torch.testing.assert_close(output, hidden_states * 2, rtol=0, atol=0)
 
 
-def test_minwm_output_projection_rejects_mismatched_shard():
+def test_zing_output_projection_rejects_mismatched_shard():
     with pytest.raises(ValueError, match="does not match split"):
-        _minwm_project_output_in_reference_row_bucket(
+        _zing_project_output_in_reference_row_bucket(
             torch.nn.Identity(),
             torch.zeros(1, 2, 4),
             (3, 2),
@@ -2199,7 +2198,7 @@ def test_minwm_output_projection_rejects_mismatched_shard():
         )
 
 
-def test_minwm_output_projection_matches_global_linear_for_nonuniform_sp8():
+def test_zing_output_projection_matches_global_linear_for_nonuniform_sp8():
     torch.manual_seed(7)
     seq_splits = (3, 3, 2, 2, 2, 2, 2, 2)
     projection = torch.nn.Linear(4, 3, bias=True)
@@ -2211,7 +2210,7 @@ def test_minwm_output_projection_matches_global_linear_for_nonuniform_sp8():
     for rank, local_seq_len in enumerate(seq_splits):
         local_hidden_states = global_hidden_states.narrow(1, row_start, local_seq_len)
         local_outputs.append(
-            _minwm_project_output_in_reference_row_bucket(
+            _zing_project_output_in_reference_row_bucket(
                 projection,
                 local_hidden_states,
                 seq_splits,
@@ -2238,7 +2237,7 @@ def test_minwm_output_projection_matches_global_linear_for_nonuniform_sp8():
         (False, torch.bfloat16, (1,) * 8, (9, 0), None, False),
     ],
 )
-def test_minwm_output_projection_reference_bucket_policy(
+def test_zing_output_projection_reference_bucket_policy(
     monkeypatch,
     is_cuda,
     dtype,
@@ -2260,15 +2259,15 @@ def test_minwm_output_projection_reference_bucket_policy(
     )
 
     assert (
-        _minwm_should_restore_reference_output_projection(hidden_states, splits)
+        _zing_should_restore_reference_output_projection(hidden_states, splits)
         is expected
     )
 
 
-def test_minwm_causal_cache_uses_local_ulysses_heads(monkeypatch):
+def test_zing_causal_cache_uses_local_ulysses_heads(monkeypatch):
     import sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing.zing_causal_denoising as stage_module
 
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage.transformer = SimpleNamespace(
         num_attention_heads=24,
         config=SimpleNamespace(
@@ -2279,7 +2278,7 @@ def test_minwm_causal_cache_uses_local_ulysses_heads(monkeypatch):
             scene_cut_sink_enabled=False,
         ),
     )
-    stage._minwm_unbounded_cache = True
+    stage._zing_unbounded_cache = True
     monkeypatch.setattr(stage_module, "get_ulysses_parallel_world_size", lambda: 4)
     monkeypatch.setattr(stage_module, "get_ring_parallel_world_size", lambda: 1)
 
@@ -2303,7 +2302,7 @@ def test_minwm_causal_cache_uses_local_ulysses_heads(monkeypatch):
 
 
 @pytest.mark.parametrize("batch_size", [1, 2])
-def test_minwm_ulysses_qkv_cpu_fallback_uses_reusable_peer_first_buffers(
+def test_zing_ulysses_qkv_cpu_fallback_uses_reusable_peer_first_buffers(
     monkeypatch, batch_size
 ):
     import sglang.multimodal_gen.runtime.layers.usp as usp_module
@@ -2344,7 +2343,7 @@ def test_minwm_ulysses_qkv_cpu_fallback_uses_reusable_peer_first_buffers(
         assert output.data_ptr() == receive_buffer.data_ptr()
 
 
-def test_minwm_ulysses_qkv_peer_first_layout_round_trips_exactly(monkeypatch):
+def test_zing_ulysses_qkv_peer_first_layout_round_trips_exactly(monkeypatch):
     import sglang.multimodal_gen.runtime.layers.usp as usp_module
 
     world_size = 2
@@ -2434,8 +2433,8 @@ def test_minwm_ulysses_qkv_peer_first_layout_round_trips_exactly(monkeypatch):
 
 
 @pytest.mark.parametrize("seq_splits", [(2, 2), (3, 2)])
-def test_minwm_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_splits):
-    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
+def test_zing_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_splits):
+    import sglang.multimodal_gen.runtime.models.dits.zing as zing_module
 
     local_seq = seq_splits[0]
     global_seq = sum(seq_splits)
@@ -2446,12 +2445,12 @@ def test_minwm_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_sp
         sequence_shard_splits=seq_splits,
     )
     monkeypatch.setattr(
-        minwm_module,
+        zing_module,
         "get_forward_context",
         lambda: SimpleNamespace(forward_batch=forward_batch),
     )
-    monkeypatch.setattr(minwm_module, "get_ulysses_parallel_world_size", lambda: 2)
-    monkeypatch.setattr(minwm_module, "_MINWM_ATTENTION_IMPL", "packed")
+    monkeypatch.setattr(zing_module, "get_ulysses_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(zing_module, "_ZING_ATTENTION_IMPL", "packed")
 
     calls = {"input": 0, "output": 0}
     communication_buffers = {}
@@ -2479,19 +2478,17 @@ def test_minwm_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_sp
 
     if seq_splits[0] == seq_splits[1]:
         monkeypatch.setattr(
-            minwm_module, "_usp_input_all_to_all_peer_first_qkv", fake_input
+            zing_module, "_usp_input_all_to_all_peer_first_qkv", fake_input
         )
-        monkeypatch.setattr(minwm_module, "_usp_output_all_to_all", fake_output)
+        monkeypatch.setattr(zing_module, "_usp_output_all_to_all", fake_output)
     else:
-        monkeypatch.setattr(
-            minwm_module, "_usp_input_all_to_all_varlen_qkv", fake_input
-        )
-        monkeypatch.setattr(minwm_module, "_usp_output_all_to_all_varlen", fake_output)
+        monkeypatch.setattr(zing_module, "_usp_input_all_to_all_varlen_qkv", fake_input)
+        monkeypatch.setattr(zing_module, "_usp_output_all_to_all_varlen", fake_output)
 
-    attention = MinWMCausalSelfAttention.__new__(MinWMCausalSelfAttention)
+    attention = ZingCausalSelfAttention.__new__(ZingCausalSelfAttention)
     torch.nn.Module.__init__(attention)
     attention.head_start = 0
-    attention.ulysses_workspace = minwm_module._MinWMUlyssesWorkspace()
+    attention.ulysses_workspace = zing_module._ZingUlyssesWorkspace()
 
     class IdentityRotary:
         @staticmethod
@@ -2499,8 +2496,8 @@ def test_minwm_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_sp
             shape = (position_ids.shape[0], head_dim // 2)
             return torch.ones(shape), torch.zeros(shape)
 
-    attention._minwm_rotary_emb = IdentityRotary()
-    cache = MinWMCausalSelfAttentionKVCache(
+    attention._zing_rotary_emb = IdentityRotary()
+    cache = ZingCausalSelfAttentionKVCache(
         k=torch.zeros(1, global_seq, local_heads, head_dim),
         v=torch.zeros(1, global_seq, local_heads, head_dim),
         global_end_index=torch.zeros(1, dtype=torch.long),
@@ -2525,7 +2522,7 @@ def test_minwm_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_sp
         assert torch.count_nonzero(value != 3).item() == 0
         return query
 
-    monkeypatch.setattr(minwm_module, "_minwm_packed_varlen_attention", fake_attention)
+    monkeypatch.setattr(zing_module, "_zing_packed_varlen_attention", fake_attention)
     output = attention.forward(
         torch.ones(1, local_seq, 4, head_dim),
         torch.full((1, local_seq, 4, head_dim), 2.0),
@@ -2575,64 +2572,64 @@ def test_minwm_causal_attention_packs_one_ulysses_collective(monkeypatch, seq_sp
         (8, {"flash_attn"}, "fa2"),
     ],
 )
-def test_minwm_attention_backend_matches_source_device_fallback(
+def test_zing_attention_backend_matches_source_device_fallback(
     monkeypatch, capability, available, expected
 ):
-    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
+    import sglang.multimodal_gen.runtime.models.dits.zing as zing_module
 
     monkeypatch.setattr(
-        minwm_module.torch.cuda,
+        zing_module.torch.cuda,
         "get_device_capability",
         lambda _device: (capability, 0),
     )
     monkeypatch.setattr(
-        minwm_module.importlib.util,
+        zing_module.importlib.util,
         "find_spec",
         lambda name: object() if name in available else None,
     )
-    assert _minwm_packed_attention_backend(torch.device("cuda")) == expected
+    assert _zing_packed_attention_backend(torch.device("cuda")) == expected
 
 
-def test_minwm_hopper_requires_fa3(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
+def test_zing_hopper_requires_fa3(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.zing as zing_module
 
     monkeypatch.setattr(
-        minwm_module.torch.cuda,
+        zing_module.torch.cuda,
         "get_device_capability",
         lambda _device: (9, 0),
     )
     monkeypatch.setattr(
-        minwm_module.importlib.util,
+        zing_module.importlib.util,
         "find_spec",
         lambda name: object() if name == "flash_attn" else None,
     )
 
     with pytest.raises(RuntimeError, match="requires.*FlashAttention-3.*Hopper"):
-        _minwm_packed_attention_backend(torch.device("cuda"))
+        _zing_packed_attention_backend(torch.device("cuda"))
 
 
-def test_minwm_strict_sm120_requires_fa4(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
+def test_zing_strict_sm120_requires_fa4(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.zing as zing_module
 
-    monkeypatch.setenv("SGLANG_MINWM_REQUIRE_SM120_FA4", "1")
+    monkeypatch.setenv("SGLANG_ZING_REQUIRE_SM120_FA4", "1")
     monkeypatch.setattr(
-        minwm_module.torch.cuda,
+        zing_module.torch.cuda,
         "get_device_capability",
         lambda _device: (12, 0),
     )
     monkeypatch.setattr(
-        minwm_module.importlib.util,
+        zing_module.importlib.util,
         "find_spec",
         lambda name: object() if name == "flash_attn" else None,
     )
 
     with pytest.raises(RuntimeError, match="requires.*FlashAttention-4.*SM120"):
-        _minwm_packed_attention_backend(torch.device("cuda"))
+        _zing_packed_attention_backend(torch.device("cuda"))
 
 
-def test_minwm_hopper_attention_uses_sglang_fa3_api(monkeypatch):
+def test_zing_hopper_attention_uses_sglang_fa3_api(monkeypatch):
     import sglang.kernels.ops.attention.flash_attention_v3 as fa3_module
-    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
+    import sglang.multimodal_gen.runtime.models.dits.zing as zing_module
 
     class FakeCudaTensor:
         def __init__(self, shape):
@@ -2648,13 +2645,11 @@ def test_minwm_hopper_attention_uses_sglang_fa3_api(monkeypatch):
         calls.append(kwargs)
         return kwargs["q"]
 
-    monkeypatch.setattr(
-        minwm_module, "_minwm_packed_attention_backend", lambda _: "fa3"
-    )
-    monkeypatch.setattr(minwm_module, "_minwm_uniform_cu_seqlens", lambda *_: object())
+    monkeypatch.setattr(zing_module, "_zing_packed_attention_backend", lambda _: "fa3")
+    monkeypatch.setattr(zing_module, "_zing_uniform_cu_seqlens", lambda *_: object())
     monkeypatch.setattr(fa3_module, "flash_attn_varlen_func", fake_fa3)
 
-    output = minwm_module._minwm_packed_varlen_attention(
+    output = zing_module._zing_packed_varlen_attention(
         FakeCudaTensor((1, 3, 2, 4)),
         FakeCudaTensor((1, 5, 2, 4)),
         FakeCudaTensor((1, 5, 2, 4)),
@@ -2667,14 +2662,14 @@ def test_minwm_hopper_attention_uses_sglang_fa3_api(monkeypatch):
     assert "deterministic" not in calls[0]
 
 
-def test_minwm_allows_benchmark_component_ablation(monkeypatch):
-    monkeypatch.setenv("MINWM_NATIVE_COMPONENTS", "")
-    config = MinWMCausalDMDConfig()
+def test_zing_allows_benchmark_component_ablation(monkeypatch):
+    monkeypatch.setenv("ZING_NATIVE_COMPONENTS", "")
+    config = ZingCausalDMDConfig()
     assert config.native_component_names == ()
 
 
-def test_minwm_rms_norm_rounds_before_weight_multiply():
-    layer = MinWMRMSNorm(8, eps=1e-6).to(torch.bfloat16)
+def test_zing_rms_norm_rounds_before_weight_multiply():
+    layer = ZingRMSNorm(8, eps=1e-6).to(torch.bfloat16)
     hidden = torch.tensor(
         [[[0.1, -0.2, 0.3, -0.4, 1.5, -2.0, 3.25, -4.5]]],
         dtype=torch.bfloat16,
@@ -2691,17 +2686,15 @@ def test_minwm_rms_norm_rounds_before_weight_multiply():
     assert not torch.equal(expected, multiply_before_rounding)
 
 
-def test_minwm_patch_embed_uses_native_conv3d_path():
+def test_zing_patch_embed_uses_native_conv3d_path():
     torch.manual_seed(5)
-    layer = MinWMPatchEmbed(
-        patch_size=(1, 2, 2), in_chans=3, embed_dim=7, flatten=False
-    )
+    layer = ZingPatchEmbed(patch_size=(1, 2, 2), in_chans=3, embed_dim=7, flatten=False)
     hidden = torch.randn(1, 3, 2, 6, 8)
     expected = layer.proj(hidden)
     torch.testing.assert_close(layer(hidden), expected, rtol=0, atol=0)
 
 
-def test_minwm_adaln_uses_bf16_modulation_sum_and_fp32_layer_norm():
+def test_zing_adaln_uses_bf16_modulation_sum_and_fp32_layer_norm():
     hidden = torch.tensor(
         [
             [
@@ -2740,7 +2733,7 @@ def test_minwm_adaln_uses_bf16_modulation_sum_and_fp32_layer_norm():
         hidden.float(), (hidden.shape[-1],), eps=1e-6
     ).to(torch.bfloat16)
     torch.testing.assert_close(
-        _minwm_layer_norm(hidden, eps=1e-6), expected_norm, rtol=0, atol=0
+        _zing_layer_norm(hidden, eps=1e-6), expected_norm, rtol=0, atol=0
     )
 
     generator = torch.Generator().manual_seed(23)
@@ -2754,7 +2747,7 @@ def test_minwm_adaln_uses_bf16_modulation_sum_and_fp32_layer_norm():
         affine_bias.to(affine_hidden.dtype).float(),
         1e-6,
     ).to(affine_hidden.dtype)
-    actual_affine_norm = _minwm_layer_norm(
+    actual_affine_norm = _zing_layer_norm(
         affine_hidden,
         eps=1e-6,
         weight=affine_weight,
@@ -2776,7 +2769,7 @@ def test_minwm_adaln_uses_bf16_modulation_sum_and_fp32_layer_norm():
         + actual_modulation.float()
     ).to(torch.bfloat16)
     torch.testing.assert_close(
-        _minwm_adaln_modulation(
+        _zing_adaln_modulation(
             hidden,
             actual_modulation,
             actual_modulation,
@@ -2788,7 +2781,7 @@ def test_minwm_adaln_uses_bf16_modulation_sum_and_fp32_layer_norm():
     )
 
 
-def test_minwm_fused_segments_match_main_eager_formulas():
+def test_zing_fused_segments_match_main_eager_formulas():
     torch.manual_seed(11)
     hidden = torch.randn(1, 6, 8, dtype=torch.bfloat16)
     residual = torch.randn_like(hidden)
@@ -2797,7 +2790,7 @@ def test_minwm_fused_segments_match_main_eager_formulas():
     expected_residual = (
         hidden.float() + residual.float() * (model.float() + timestep.float())
     ).to(hidden.dtype)
-    actual_residual = _minwm_adaln_op(
+    actual_residual = _zing_adaln_op(
         hidden,
         y=residual,
         m_gate=model,
@@ -2811,16 +2804,12 @@ def test_minwm_fused_segments_match_main_eager_formulas():
     key_weight = torch.randn(8, dtype=torch.bfloat16)
     angles = torch.randn(6, 2, dtype=torch.float32)
     rope = torch.stack((angles.cos(), angles.sin()), dim=-1)
-    actual_query, actual_key = _minwm_qk_norm_rope_op(
+    actual_query, actual_key = _zing_qk_norm_rope_op(
         query, key, query_weight, key_weight, 1e-6, rope, 2
     )
-    raw_query, raw_key = _minwm_qk_norm_op(
-        query, key, query_weight, key_weight, 1e-6, 2
-    )
-    separated_query = apply_minwm_rotary_embedding(
-        raw_query, rope[..., 0], rope[..., 1]
-    )
-    separated_key = apply_minwm_rotary_embedding(raw_key, rope[..., 0], rope[..., 1])
+    raw_query, raw_key = _zing_qk_norm_op(query, key, query_weight, key_weight, 1e-6, 2)
+    separated_query = apply_zing_rotary_embedding(raw_query, rope[..., 0], rope[..., 1])
+    separated_key = apply_zing_rotary_embedding(raw_key, rope[..., 0], rope[..., 1])
     torch.testing.assert_close(separated_query, actual_query, rtol=0, atol=0)
     torch.testing.assert_close(separated_key, actual_key, rtol=0, atol=0)
 
@@ -2849,8 +2838,8 @@ def test_minwm_fused_segments_match_main_eager_formulas():
     torch.testing.assert_close(actual_key, expected(key, key_weight), rtol=0, atol=0)
 
 
-def test_minwm_cache_qk_norm_stays_eager(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
+def test_zing_cache_qk_norm_stays_eager(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.zing as zing_module
 
     compile_calls = []
 
@@ -2859,7 +2848,7 @@ def test_minwm_cache_qk_norm_stays_eager(monkeypatch):
         return operation
 
     monkeypatch.setattr(
-        minwm_module._MinWMSegmentCompile,
+        zing_module._ZingSegmentCompile,
         "get",
         classmethod(fake_get),
     )
@@ -2870,7 +2859,7 @@ def test_minwm_cache_qk_norm_stays_eager(monkeypatch):
     value = torch.tensor(2)
 
     assert (
-        _minwm_apply_qk_op(
+        _zing_apply_qk_op(
             operation,
             [value],
             use_cache=True,
@@ -2880,7 +2869,7 @@ def test_minwm_cache_qk_norm_stays_eager(monkeypatch):
     )
     assert compile_calls == []
     assert (
-        _minwm_apply_qk_op(
+        _zing_apply_qk_op(
             operation,
             [value],
             use_cache=False,
@@ -2891,23 +2880,23 @@ def test_minwm_cache_qk_norm_stays_eager(monkeypatch):
     assert compile_calls == [True]
 
 
-def test_minwm_cuda_graph_disables_segment_compile(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
+def test_zing_cuda_graph_disables_segment_compile(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.zing as zing_module
 
     def operation(value):
         return value
 
-    monkeypatch.setattr(minwm_module, "_MINWM_SEGMENT_COMPILE", True)
-    monkeypatch.setattr(minwm_module, "_MINWM_CUDA_GRAPH_ACTIVE", False)
-    monkeypatch.setattr(minwm_module._MinWMSegmentCompile, "_compiled", {})
+    monkeypatch.setattr(zing_module, "_ZING_SEGMENT_COMPILE", True)
+    monkeypatch.setattr(zing_module, "_ZING_CUDA_GRAPH_ACTIVE", False)
+    monkeypatch.setattr(zing_module._ZingSegmentCompile, "_compiled", {})
 
-    minwm_module.set_minwm_cuda_graph_active(True)
+    zing_module.set_zing_cuda_graph_active(True)
 
-    assert minwm_module._MinWMSegmentCompile.get(operation, True) is operation
-    assert minwm_module._MinWMSegmentCompile._compiled == {}
+    assert zing_module._ZingSegmentCompile.get(operation, True) is operation
+    assert zing_module._ZingSegmentCompile._compiled == {}
 
 
-def test_minwm_rotary_embedding_matches_main_explicit_formula():
+def test_zing_rotary_embedding_matches_main_explicit_formula():
     torch.manual_seed(9)
     hidden = torch.randn(1, 5, 3, 8, dtype=torch.bfloat16)
     angles = torch.randn(5, 4, dtype=torch.float64)
@@ -2924,63 +2913,63 @@ def test_minwm_rotary_embedding_matches_main_explicit_formula():
     ).flatten(-2)
     expected = expected.to(hidden.dtype)
     torch.testing.assert_close(
-        apply_minwm_rotary_embedding(hidden, cos, sin), expected, rtol=0, atol=0
+        apply_zing_rotary_embedding(hidden, cos, sin), expected, rtol=0, atol=0
     )
 
 
-def test_minwm_rotary_embedding_dispatches_supported_hopper_inputs(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
+def test_zing_rotary_embedding_dispatches_supported_hopper_inputs(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.zing as zing_module
 
     hidden = torch.randn(1, 5, 3, 8, dtype=torch.bfloat16)
     cos = torch.randn(5, 4)
     sin = torch.randn(5, 4)
     sentinel = torch.empty_like(hidden)
 
-    monkeypatch.setattr(minwm_module, "can_use_minwm_rotary", lambda *_: True)
-    monkeypatch.setattr(minwm_module, "minwm_rotary", lambda *_: sentinel)
+    monkeypatch.setattr(zing_module, "can_use_zing_rotary", lambda *_: True)
+    monkeypatch.setattr(zing_module, "zing_rotary", lambda *_: sentinel)
 
-    assert apply_minwm_rotary_embedding(hidden, cos, sin) is sentinel
+    assert apply_zing_rotary_embedding(hidden, cos, sin) is sentinel
 
 
-def test_minwm_rotary_embedding_out_dispatches_supported_hopper_inputs(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
+def test_zing_rotary_embedding_out_dispatches_supported_hopper_inputs(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.zing as zing_module
 
     hidden = torch.randn(1, 5, 3, 8, dtype=torch.bfloat16)
     cos = torch.randn(5, 4)
     sin = torch.randn(5, 4)
     output = torch.empty_like(hidden)
 
-    monkeypatch.setattr(minwm_module, "can_use_minwm_rotary_out", lambda *_: True)
-    monkeypatch.setattr(minwm_module, "minwm_rotary_out", lambda *args: args[-1])
+    monkeypatch.setattr(zing_module, "can_use_zing_rotary_out", lambda *_: True)
+    monkeypatch.setattr(zing_module, "zing_rotary_out", lambda *args: args[-1])
 
-    assert apply_minwm_rotary_embedding_out(hidden, cos, sin, output) is output
+    assert apply_zing_rotary_embedding_out(hidden, cos, sin, output) is output
 
 
-def test_minwm_rotary_embedding_out_fallback_writes_caller_tensor():
+def test_zing_rotary_embedding_out_fallback_writes_caller_tensor():
     torch.manual_seed(10)
     hidden = torch.randn(1, 5, 3, 8, dtype=torch.bfloat16)
     angles = torch.randn(5, 4)
     cos = angles.cos()
     sin = angles.sin()
     output = torch.empty_like(hidden)
-    expected = apply_minwm_rotary_embedding(hidden, cos, sin)
+    expected = apply_zing_rotary_embedding(hidden, cos, sin)
 
-    actual = apply_minwm_rotary_embedding_out(hidden, cos, sin, output)
+    actual = apply_zing_rotary_embedding_out(hidden, cos, sin, output)
 
     assert actual is output
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-def test_minwm_five_passes_rotate_q_five_times_and_full_k_once(monkeypatch):
-    import sglang.multimodal_gen.runtime.models.dits.zing as minwm_module
+def test_zing_five_passes_rotate_q_five_times_and_full_k_once(monkeypatch):
+    import sglang.multimodal_gen.runtime.models.dits.zing as zing_module
 
-    cache = _make_minwm_test_cache(cache_size=6, sink_tokens=0)
-    _append_minwm_test_frames(cache, [0, 1], token_start=0)
+    cache = _make_zing_test_cache(cache_size=6, sink_tokens=0)
+    _append_zing_test_frames(cache, [0, 1], token_start=0)
     cache.set_current_position_ids(
         torch.tensor([[2, 0, 0], [3, 0, 0]], dtype=torch.long)
     )
 
-    attention = MinWMCausalSelfAttention.__new__(MinWMCausalSelfAttention)
+    attention = ZingCausalSelfAttention.__new__(ZingCausalSelfAttention)
     torch.nn.Module.__init__(attention)
     attention.head_start = 0
 
@@ -2991,18 +2980,18 @@ def test_minwm_five_passes_rotate_q_five_times_and_full_k_once(monkeypatch):
                 position_ids.shape[0], 1
             )
 
-    attention._minwm_rotary_emb = IdentityRotary()
+    attention._zing_rotary_emb = IdentityRotary()
     monkeypatch.setattr(
-        minwm_module,
+        zing_module,
         "get_forward_context",
         lambda: SimpleNamespace(forward_batch=None),
     )
-    monkeypatch.setattr(minwm_module, "get_ulysses_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(minwm_module, "_MINWM_ATTENTION_IMPL", "packed")
-    monkeypatch.setattr(minwm_module, "_MINWM_CACHE_ROTATED_K", True)
+    monkeypatch.setattr(zing_module, "get_ulysses_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(zing_module, "_ZING_ATTENTION_IMPL", "packed")
+    monkeypatch.setattr(zing_module, "_ZING_CACHE_ROTATED_K", True)
     monkeypatch.setattr(
-        minwm_module,
-        "_minwm_packed_varlen_attention",
+        zing_module,
+        "_zing_packed_varlen_attention",
         lambda query, _key, _value: query,
     )
 
@@ -3018,8 +3007,8 @@ def test_minwm_five_passes_rotate_q_five_times_and_full_k_once(monkeypatch):
         output.copy_(hidden)
         return output
 
-    monkeypatch.setattr(minwm_module, "apply_minwm_rotary_embedding", record_query)
-    monkeypatch.setattr(minwm_module, "apply_minwm_rotary_embedding_out", record_key)
+    monkeypatch.setattr(zing_module, "apply_zing_rotary_embedding", record_query)
+    monkeypatch.setattr(zing_module, "apply_zing_rotary_embedding_out", record_key)
 
     query = torch.ones(1, 2, 1, 2)
     key = torch.full_like(query, 2)
@@ -3041,8 +3030,8 @@ def test_minwm_five_passes_rotate_q_five_times_and_full_k_once(monkeypatch):
     assert cache.rotated_k_is_valid
 
 
-def test_minwm_vae_pixel_and_latent_arithmetic_matches_main():
-    config = MinWMCausalDMDConfig()
+def test_zing_vae_pixel_and_latent_arithmetic_matches_main():
+    config = ZingCausalDMDConfig()
     assert config.preprocess_vae_encode_before_dtype_cast is True
     pixels = torch.arange(256, dtype=torch.uint8).reshape(1, 1, 1, 16, 16)
     generic_normalized = pixels.float().div(255.0).mul(2.0).sub(1.0)
@@ -3069,8 +3058,8 @@ def test_minwm_vae_pixel_and_latent_arithmetic_matches_main():
     torch.testing.assert_close(decoded, expected_decoded, rtol=0, atol=0)
 
 
-def test_minwm_reference_latent_does_not_get_generic_i2v_mask_channels():
-    config = MinWMCausalDMDConfig()
+def test_zing_reference_latent_does_not_get_generic_i2v_mask_channels():
+    config = ZingCausalDMDConfig()
     latent = torch.randn(1, 48, 1, 30, 52)
     assert config.postprocess_image_latent(latent, None) is latent
     with pytest.raises(ValueError, match="48 channels"):

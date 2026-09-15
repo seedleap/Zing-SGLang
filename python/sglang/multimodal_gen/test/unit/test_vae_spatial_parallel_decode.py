@@ -22,7 +22,7 @@ from sglang.multimodal_gen.configs.models.vaes.stablediffusion3 import (
     StableDiffusion3VAEConfig,
 )
 from sglang.multimodal_gen.configs.models.vaes.wanvae import WanVAEConfig
-from sglang.multimodal_gen.configs.pipeline_configs.zing import MinWMWan22VAEConfig
+from sglang.multimodal_gen.configs.pipeline_configs.zing import ZingWan22VAEConfig
 from sglang.multimodal_gen.configs.utils import update_config_from_args
 from sglang.multimodal_gen.runtime.distributed import parallel_state
 from sglang.multimodal_gen.runtime.layers.parallel_conv import (
@@ -136,8 +136,8 @@ class TestVAESpatialParallelDecode(unittest.TestCase):
             )
         )
 
-    def test_minwm_parallel_vae_auto_threshold_targets_720p_sp2(self):
-        config = MinWMWan22VAEConfig()
+    def test_zing_parallel_vae_auto_threshold_targets_720p_sp2(self):
+        config = ZingWan22VAEConfig()
 
         self.assertFalse(
             should_use_spatial_shard_parallel_decode(
@@ -205,7 +205,7 @@ class TestVAESpatialParallelDecode(unittest.TestCase):
                 ]
             )
         )
-        config = MinWMWan22VAEConfig()
+        config = ZingWan22VAEConfig()
 
         update_config_from_args(config, parsed, "vae_config")
 
