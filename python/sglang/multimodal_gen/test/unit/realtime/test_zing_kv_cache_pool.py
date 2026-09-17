@@ -9,7 +9,7 @@ from sglang.multimodal_gen.runtime.layers.kvcache.causal_attention_cache import 
     CrossAttentionKVCache,
 )
 from sglang.multimodal_gen.runtime.models.dits.zing_kv_cache import (
-    MinWMCausalSelfAttentionKVCache,
+    ZingCausalSelfAttentionKVCache,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.causal_denoising import (
     CausalDMDCachePolicy,
@@ -18,7 +18,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.z
     zing_causal_denoising as zing_stage_module,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing.zing_causal_denoising import (
-    MinWMCausalDMDDenoisingStage,
+    ZingCausalDMDDenoisingStage,
 )
 from sglang.multimodal_gen.runtime.realtime.causal_kv_cache_pool import (
     RealtimeKVCachePool,
@@ -32,7 +32,7 @@ from sglang.multimodal_gen.runtime.realtime.states import (
 
 
 def _cache_slot(slot_id: int) -> RealtimeKVCachePoolSlot:
-    kv_cache = MinWMCausalSelfAttentionKVCache(
+    kv_cache = ZingCausalSelfAttentionKVCache(
         k=torch.empty(1, 8, 2, 4),
         v=torch.empty(1, 8, 2, 4),
         global_end_index=torch.zeros(1, dtype=torch.long),
@@ -88,8 +88,8 @@ def test_realtime_kv_cache_pool_honors_capacity_and_reuses_slots_fifo():
     assert pool.acquire().slot_id == second_slot.slot_id
 
 
-def test_minwm_pool_rejects_capacity_below_worker_admission_limit():
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+def test_zing_pool_rejects_capacity_below_worker_admission_limit():
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     server_args = SimpleNamespace(
         pipeline_config=SimpleNamespace(
             realtime_causal_kv_cache_pool_size=1,
@@ -102,8 +102,8 @@ def test_minwm_pool_rejects_capacity_below_worker_admission_limit():
         stage.initialize_realtime_kv_cache_pool(server_args)
 
 
-def test_minwm_pool_defaults_off_when_no_launch_contract_is_configured():
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+def test_zing_pool_defaults_off_when_no_launch_contract_is_configured():
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage._realtime_kv_cache_pool = None
     server_args = SimpleNamespace(
         pipeline_config=SimpleNamespace(),
@@ -128,8 +128,8 @@ def test_minwm_pool_defaults_off_when_no_launch_contract_is_configured():
         ),
     ),
 )
-def test_minwm_pool_rejects_partial_launch_contract(pipeline_config, message):
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+def test_zing_pool_rejects_partial_launch_contract(pipeline_config, message):
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     server_args = SimpleNamespace(
         pipeline_config=pipeline_config,
         realtime_max_sessions_per_worker=1,
@@ -139,7 +139,7 @@ def test_minwm_pool_rejects_partial_launch_contract(pipeline_config, message):
         stage.initialize_realtime_kv_cache_pool(server_args)
 
 
-def test_minwm_pool_is_fully_allocated_during_stage_initialization(monkeypatch):
+def test_zing_pool_is_fully_allocated_during_stage_initialization(monkeypatch):
     arch_config = SimpleNamespace(
         patch_size=(1, 2, 2),
         sink_size=0,
@@ -150,7 +150,7 @@ def test_minwm_pool_is_fully_allocated_during_stage_initialization(monkeypatch):
         scene_cut_rope_offset=0,
         scene_cut_sink_enabled=False,
     )
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage.transformer = SimpleNamespace(
         config=arch_config,
         num_attention_heads=4,
@@ -163,8 +163,8 @@ def test_minwm_pool_is_fully_allocated_during_stage_initialization(monkeypatch):
     stage.num_frames_per_block = 4
     stage.causal_kv_cache = None
     stage.crossattn_cache = None
-    stage._minwm_cuda_graph_enabled = False
-    stage._minwm_cuda_graph_runner = None
+    stage._zing_cuda_graph_enabled = False
+    stage._zing_cuda_graph_runner = None
     stage._realtime_kv_cache_pool = None
     stage._realtime_kv_cache_pool_policies = {}
     stage._realtime_kv_cache_pool_shapes = {}
@@ -235,7 +235,7 @@ def test_minwm_pool_is_fully_allocated_during_stage_initialization(monkeypatch):
     assert all(item["batch_size"] == 1 for item in allocations)
 
 
-def test_minwm_realtime_requests_reset_and_reuse_startup_pool_slot(monkeypatch):
+def test_zing_realtime_requests_reset_and_reuse_startup_pool_slot(monkeypatch):
     slot = _cache_slot(0)
     pool = RealtimeKVCachePool([slot])
     policy = CausalDMDCachePolicy(
@@ -245,7 +245,7 @@ def test_minwm_realtime_requests_reset_and_reuse_startup_pool_slot(monkeypatch):
         expected_sink_tokens=0,
         kv_cache_kwargs={"allow_growth": False},
     )
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage._realtime_kv_cache_pool = pool
     stage._realtime_kv_cache_pool_policies = {"832x480": policy}
     stage._realtime_kv_cache_pool_shapes = {"832x480": (1, 2, 3)}
@@ -308,7 +308,7 @@ def test_minwm_realtime_requests_reset_and_reuse_startup_pool_slot(monkeypatch):
     assert len(resets) == 2
 
 
-def test_minwm_pool_shape_mismatch_fails_before_acquiring_slot(monkeypatch):
+def test_zing_pool_shape_mismatch_fails_before_acquiring_slot(monkeypatch):
     slot = _cache_slot(0)
     pool = RealtimeKVCachePool([slot])
     policy = CausalDMDCachePolicy(
@@ -318,7 +318,7 @@ def test_minwm_pool_shape_mismatch_fails_before_acquiring_slot(monkeypatch):
         expected_sink_tokens=0,
         kv_cache_kwargs={"allow_growth": False},
     )
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage._realtime_kv_cache_pool = pool
     stage._realtime_kv_cache_pool_policies = {"832x480": policy}
     stage._realtime_kv_cache_pool_shapes = {"832x480": (1, 2, 3)}
@@ -344,7 +344,7 @@ def test_minwm_pool_shape_mismatch_fails_before_acquiring_slot(monkeypatch):
     assert pool.acquire_count == 0
 
 
-def test_minwm_pool_reuses_max_backing_for_all_resolution_buckets(monkeypatch):
+def test_zing_pool_reuses_max_backing_for_all_resolution_buckets(monkeypatch):
     slot = _cache_slot(0)
     pool = RealtimeKVCachePool([slot])
     policies = {
@@ -370,7 +370,7 @@ def test_minwm_pool_reuses_max_backing_for_all_resolution_buckets(monkeypatch):
             kv_cache_kwargs={"allow_growth": False},
         ),
     }
-    stage = MinWMCausalDMDDenoisingStage.__new__(MinWMCausalDMDDenoisingStage)
+    stage = ZingCausalDMDDenoisingStage.__new__(ZingCausalDMDDenoisingStage)
     stage._realtime_kv_cache_pool = pool
     stage._realtime_kv_cache_pool_policies = policies
     stage._realtime_kv_cache_pool_shapes = {

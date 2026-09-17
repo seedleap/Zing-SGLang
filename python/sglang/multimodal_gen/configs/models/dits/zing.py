@@ -1,5 +1,5 @@
 # Copyright 2026 Seedleap.ai
-# Adapted from the Apache-2.0 minWM and Wan implementations.
+# Adapted from the Apache-2.0 Zing and Wan implementations.
 # SPDX-License-Identifier: Apache-2.0
 """Architecture config for the Zing-0.5 Wan2.2-5B DMD model."""
 
@@ -10,7 +10,7 @@ from sglang.multimodal_gen.configs.models.fsdp import is_block
 
 
 @dataclass
-class MinWMVideoArchConfig(DiTArchConfig):
+class ZingVideoArchConfig(DiTArchConfig):
     _fsdp_shard_conditions: list = field(default_factory=lambda: [is_block])
     param_names_mapping: dict = field(
         default_factory=lambda: {
@@ -117,6 +117,6 @@ class MinWMVideoArchConfig(DiTArchConfig):
 
 
 @dataclass
-class MinWMVideoConfig(DiTConfig):
-    arch_config: DiTArchConfig = field(default_factory=MinWMVideoArchConfig)
+class ZingVideoConfig(DiTConfig):
+    arch_config: DiTArchConfig = field(default_factory=ZingVideoArchConfig)
     prefix: str = "Wan"

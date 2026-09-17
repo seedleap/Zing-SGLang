@@ -206,7 +206,7 @@ def _usp_input_all_to_all_peer_first_qkv(
 
     exchanged = _usp_all_to_all_single(packed, output_buffer=output_buffer)
     # Keep each destination's head shard sequence-major in the collective.
-    # For MinWM realtime's batch=1 this permutation is contiguous, so reshape
+    # For Zing realtime's batch=1 this permutation is contiguous, so reshape
     # aliases the receive buffer instead of launching a full QKV layout copy.
     return exchanged.permute(1, 0, 2, 3, 4).reshape(
         b, s_local * world_size, h_local, 3 * d

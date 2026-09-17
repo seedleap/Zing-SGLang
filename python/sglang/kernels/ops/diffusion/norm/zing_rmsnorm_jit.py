@@ -20,23 +20,23 @@ if TYPE_CHECKING:
     from tvm_ffi.module import Module
 
 
-_MINWM_HIDDEN_SIZE = 3072
+_ZING_HIDDEN_SIZE = 3072
 
 
-def is_supported_minwm_rmsnorm_hidden_size(hidden_size: int) -> bool:
-    return hidden_size == _MINWM_HIDDEN_SIZE
+def is_supported_zing_rmsnorm_hidden_size(hidden_size: int) -> bool:
+    return hidden_size == _ZING_HIDDEN_SIZE
 
 
 @cache_once
-def _jit_minwm_rmsnorm_module(hidden_size: int, dtype: torch.dtype) -> Module:
+def _jit_zing_rmsnorm_module(hidden_size: int, dtype: torch.dtype) -> Module:
     args = make_cpp_args(hidden_size, is_arch_support_pdl(), dtype)
     return load_jit(
-        "diffusion_minwm_rmsnorm",
+        "diffusion_zing_rmsnorm",
         *args,
         cuda_files=["diffusion/zing_rmsnorm.cuh"],
         cuda_wrappers=[
-            ("minwm_rmsnorm", f"MinWMRMSNormKernel<{args}>::run"),
-            ("minwm_fused_qknorm", f"MinWMFusedQKNormKernel<{args}>::run"),
+            ("zing_rmsnorm", f"ZingRMSNormKernel<{args}>::run"),
+            ("zing_fused_qknorm", f"ZingFusedQKNormKernel<{args}>::run"),
         ],
     )
 
@@ -59,23 +59,23 @@ def _fake_fused_qknorm(
     return q.new_empty(q.shape), k.new_empty(k.shape)
 
 
-@register_custom_op(op_name="minwm_rmsnorm", mutates_args=[], fake_impl=_fake_rmsnorm)
-def _minwm_rmsnorm_custom_op(
+@register_custom_op(op_name="zing_rmsnorm", mutates_args=[], fake_impl=_fake_rmsnorm)
+def _zing_rmsnorm_custom_op(
     input: torch.Tensor, weight: torch.Tensor, eps: float
 ) -> torch.Tensor:
     output = torch.empty(input.shape, dtype=input.dtype, device=input.device)
     if input.numel() == 0:
         return output
-    _launch_minwm_rmsnorm(input, weight, output, eps)
+    _launch_zing_rmsnorm(input, weight, output, eps)
     return output
 
 
 @register_custom_op(
-    op_name="minwm_fused_qknorm",
+    op_name="zing_fused_qknorm",
     mutates_args=[],
     fake_impl=_fake_fused_qknorm,
 )
-def _minwm_fused_qknorm_custom_op(
+def _zing_fused_qknorm_custom_op(
     q: torch.Tensor,
     k: torch.Tensor,
     q_weight: torch.Tensor,
@@ -86,21 +86,21 @@ def _minwm_fused_qknorm_custom_op(
     k_output = torch.empty(k.shape, dtype=k.dtype, device=k.device)
     if q.numel() == 0:
         return q_output, k_output
-    _launch_minwm_fused_qknorm(q, k, q_weight, k_weight, q_output, k_output, eps)
+    _launch_zing_fused_qknorm(q, k, q_weight, k_weight, q_output, k_output, eps)
     return q_output, k_output
 
 
-def _launch_minwm_rmsnorm(
+def _launch_zing_rmsnorm(
     input: torch.Tensor,
     weight: torch.Tensor,
     output: torch.Tensor,
     eps: float,
 ) -> None:
-    module = _jit_minwm_rmsnorm_module(input.shape[-1], input.dtype)
-    module.minwm_rmsnorm(input, weight, output, eps)
+    module = _jit_zing_rmsnorm_module(input.shape[-1], input.dtype)
+    module.zing_rmsnorm(input, weight, output, eps)
 
 
-def _launch_minwm_fused_qknorm(
+def _launch_zing_fused_qknorm(
     q: torch.Tensor,
     k: torch.Tensor,
     q_weight: torch.Tensor,
@@ -109,47 +109,45 @@ def _launch_minwm_fused_qknorm(
     k_output: torch.Tensor,
     eps: float,
 ) -> None:
-    module = _jit_minwm_rmsnorm_module(q.shape[-1], q.dtype)
-    module.minwm_fused_qknorm(q, k, q_weight, k_weight, q_output, k_output, eps)
+    module = _jit_zing_rmsnorm_module(q.shape[-1], q.dtype)
+    module.zing_fused_qknorm(q, k, q_weight, k_weight, q_output, k_output, eps)
 
 
 def _flatten_rows(input: torch.Tensor) -> torch.Tensor:
     if input.ndim < 2:
-        raise RuntimeError(
-            f"MinWM RMSNorm input must be at least 2D, got {input.ndim}D"
-        )
+        raise RuntimeError(f"Zing RMSNorm input must be at least 2D, got {input.ndim}D")
     try:
         return input.view(-1, input.shape[-1])
     except RuntimeError as exc:
         raise RuntimeError(
-            "MinWM RMSNorm requires leading dimensions that flatten without a copy"
+            "Zing RMSNorm requires leading dimensions that flatten without a copy"
         ) from exc
 
 
 def _validate_input(input: torch.Tensor, weight: torch.Tensor) -> None:
     if not input.is_cuda:
-        raise RuntimeError("MinWM JIT RMSNorm requires CUDA tensors")
+        raise RuntimeError("Zing JIT RMSNorm requires CUDA tensors")
     if input.dtype not in (torch.float16, torch.bfloat16):
         raise RuntimeError(
-            f"MinWM JIT RMSNorm requires fp16 or bf16 input, got {input.dtype}"
+            f"Zing JIT RMSNorm requires fp16 or bf16 input, got {input.dtype}"
         )
     if input.stride(-1) != 1:
-        raise RuntimeError("MinWM JIT RMSNorm requires contiguous rows")
+        raise RuntimeError("Zing JIT RMSNorm requires contiguous rows")
     hidden_size = input.shape[-1]
-    if not is_supported_minwm_rmsnorm_hidden_size(hidden_size):
+    if not is_supported_zing_rmsnorm_hidden_size(hidden_size):
         raise RuntimeError(
-            f"unsupported MinWM RMSNorm hidden_size={hidden_size}; "
-            f"expected {_MINWM_HIDDEN_SIZE}"
+            f"unsupported Zing RMSNorm hidden_size={hidden_size}; "
+            f"expected {_ZING_HIDDEN_SIZE}"
         )
     if weight.shape != (hidden_size,):
         raise RuntimeError(
-            f"MinWM RMSNorm weight must have shape ({hidden_size},), got {tuple(weight.shape)}"
+            f"Zing RMSNorm weight must have shape ({hidden_size},), got {tuple(weight.shape)}"
         )
     if weight.device != input.device or weight.dtype != input.dtype:
-        raise RuntimeError("MinWM RMSNorm weight must match input device and dtype")
+        raise RuntimeError("Zing RMSNorm weight must match input device and dtype")
 
 
-def can_use_minwm_rmsnorm(input: torch.Tensor, weight: torch.Tensor) -> bool:
+def can_use_zing_rmsnorm(input: torch.Tensor, weight: torch.Tensor) -> bool:
     try:
         _validate_input(input, weight)
         _flatten_rows(input)
@@ -158,35 +156,35 @@ def can_use_minwm_rmsnorm(input: torch.Tensor, weight: torch.Tensor) -> bool:
     return True
 
 
-def minwm_rmsnorm(
+def zing_rmsnorm(
     input: torch.Tensor, weight: torch.Tensor, eps: float = 1e-5
 ) -> torch.Tensor:
-    """Apply MinWM's cast-before-weight RMSNorm and return contiguous output."""
+    """Apply Zing's cast-before-weight RMSNorm and return contiguous output."""
     _validate_input(input, weight)
     shape = input.shape
     flat_input = _flatten_rows(input)
     if torch.compiler.is_compiling():
-        output = _minwm_rmsnorm_custom_op(flat_input, weight, float(eps))
+        output = _zing_rmsnorm_custom_op(flat_input, weight, float(eps))
     else:
         output = torch.empty_like(flat_input)
         if output.numel() != 0:
-            _launch_minwm_rmsnorm(flat_input, weight, output, float(eps))
+            _launch_zing_rmsnorm(flat_input, weight, output, float(eps))
     return output.view(shape)
 
 
-def minwm_rmsnorm_unchecked(
+def zing_rmsnorm_unchecked(
     input: torch.Tensor, weight: torch.Tensor, eps: float = 1e-5
 ) -> torch.Tensor:
     """Launch the eager fast path after the caller has validated the tensors."""
     shape = input.shape
-    flat_input = input.view(-1, _MINWM_HIDDEN_SIZE)
+    flat_input = input.view(-1, _ZING_HIDDEN_SIZE)
     output = torch.empty_like(flat_input)
     if output.numel() != 0:
-        _launch_minwm_rmsnorm(flat_input, weight, output, float(eps))
+        _launch_zing_rmsnorm(flat_input, weight, output, float(eps))
     return output.view(shape)
 
 
-def minwm_fused_qknorm(
+def zing_fused_qknorm(
     q: torch.Tensor,
     k: torch.Tensor,
     q_weight: torch.Tensor,
@@ -198,13 +196,13 @@ def minwm_fused_qknorm(
     _validate_input(k, k_weight)
     if q.shape != k.shape:
         raise RuntimeError(
-            f"MinWM fused Q/K RMSNorm requires equal shapes, got {q.shape} and {k.shape}"
+            f"Zing fused Q/K RMSNorm requires equal shapes, got {q.shape} and {k.shape}"
         )
     shape = q.shape
     flat_q = _flatten_rows(q)
     flat_k = _flatten_rows(k)
     if torch.compiler.is_compiling():
-        q_output, k_output = _minwm_fused_qknorm_custom_op(
+        q_output, k_output = _zing_fused_qknorm_custom_op(
             flat_q,
             flat_k,
             q_weight,
@@ -215,7 +213,7 @@ def minwm_fused_qknorm(
         q_output = torch.empty_like(flat_q)
         k_output = torch.empty_like(flat_k)
         if q_output.numel() != 0:
-            _launch_minwm_fused_qknorm(
+            _launch_zing_fused_qknorm(
                 flat_q,
                 flat_k,
                 q_weight,
@@ -227,7 +225,7 @@ def minwm_fused_qknorm(
     return q_output.view(shape), k_output.view(shape)
 
 
-def minwm_fused_qknorm_unchecked(
+def zing_fused_qknorm_unchecked(
     q: torch.Tensor,
     k: torch.Tensor,
     q_weight: torch.Tensor,
@@ -236,12 +234,12 @@ def minwm_fused_qknorm_unchecked(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Launch fused eager Q/K RMSNorm after the caller has validated tensors."""
     shape = q.shape
-    flat_q = q.view(-1, _MINWM_HIDDEN_SIZE)
-    flat_k = k.view(-1, _MINWM_HIDDEN_SIZE)
+    flat_q = q.view(-1, _ZING_HIDDEN_SIZE)
+    flat_k = k.view(-1, _ZING_HIDDEN_SIZE)
     q_output = torch.empty_like(flat_q)
     k_output = torch.empty_like(flat_k)
     if q_output.numel() != 0:
-        _launch_minwm_fused_qknorm(
+        _launch_zing_fused_qknorm(
             flat_q,
             flat_k,
             q_weight,

@@ -1,10 +1,10 @@
 # Copyright 2026 Seedleap.ai
-# Adapted from the Apache-2.0 minWM and Wan inference implementations.
+# Adapted from the Apache-2.0 Zing and Wan inference implementations.
 # SPDX-License-Identifier: Apache-2.0
 """Realtime API pipeline for Zing-0.5."""
 
 from sglang.multimodal_gen.runtime.models.schedulers.scheduling_flow_unipc_multistep import (
-    MinWMFlowUniPCParityScheduler,
+    ZingFlowUniPCParityScheduler,
 )
 from sglang.multimodal_gen.runtime.models.schedulers.scheduling_self_forcing_flow_match import (
     SelfForcingFlowMatchScheduler,
@@ -18,10 +18,10 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages import (
     TimestepPreparationStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.zing import (
-    MinWMCausalDMDDenoisingStage,
-    MinWMCausalUniPCDenoisingStage,
-    MinWMCausalVaeDecodingStage,
-    MinWMChunkLatentPreparationStage,
+    ZingCausalDMDDenoisingStage,
+    ZingCausalUniPCDenoisingStage,
+    ZingCausalVaeDecodingStage,
+    ZingChunkLatentPreparationStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime import (
     RealtimeImageVAEEncodingStage,
@@ -31,8 +31,8 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.realtime import (
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
 
-class MinWMCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
-    pipeline_name = "MinWMCausalDMDPipeline"
+class ZingCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
+    pipeline_name = "ZingCausalDMDPipeline"
     _required_config_modules = [
         "text_encoder",
         "tokenizer",
@@ -84,11 +84,11 @@ class MinWMCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
             )
         if bool(getattr(server_args, "use_fsdp_inference", False)):
             raise ValueError(
-                "MinWM causal Ulysses cannot be combined with FSDP inference yet."
+                "Zing causal Ulysses cannot be combined with FSDP inference yet."
             )
         if bool(getattr(server_args, "enable_torch_compile", False)):
             raise ValueError(
-                "MinWM causal Ulysses cannot be combined with whole-DiT "
+                "Zing causal Ulysses cannot be combined with whole-DiT "
                 "torch.compile yet."
             )
 
@@ -103,8 +103,8 @@ class MinWMCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
         )
         self.add_stage(RealtimeImageVAEEncodingStage(vae=self.get_module("vae")))
         self.add_stage(DMDTimestepPreparationStage(self.get_module("scheduler")))
-        self.add_stage(MinWMChunkLatentPreparationStage(self.get_module("transformer")))
-        denoising_stage = MinWMCausalDMDDenoisingStage(
+        self.add_stage(ZingChunkLatentPreparationStage(self.get_module("transformer")))
+        denoising_stage = ZingCausalDMDDenoisingStage(
             transformer=self.get_module("transformer"),
             scheduler=self.get_module("scheduler"),
         )
@@ -114,27 +114,27 @@ class MinWMCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
 
     def _add_realtime_output_stage(self) -> None:
         self.add_stage(
-            MinWMCausalVaeDecodingStage(
+            ZingCausalVaeDecodingStage(
                 vae=self.get_module("vae"),
                 pipeline=self,
             )
         )
 
 
-def _minwm_unipc_shift(_batch, server_args: ServerArgs):
+def _zing_unipc_shift(_batch, server_args: ServerArgs):
     return "shift", server_args.pipeline_config.flow_shift
 
 
-class MinWMCausalUniPCPipeline(MinWMCausalDMDPipeline):
-    """Realtime MinWM pipeline matching V3 ``sample_solver: unipc``."""
+class ZingCausalUniPCPipeline(ZingCausalDMDPipeline):
+    """Realtime Zing pipeline matching V3 ``sample_solver: unipc``."""
 
-    pipeline_name = "MinWMCausalUniPCPipeline"
+    pipeline_name = "ZingCausalUniPCPipeline"
 
     def initialize_pipeline(self, server_args: ServerArgs) -> None:
         # Native V3 constructs the scheduler at shift=1, then supplies the
         # configured shift to set_timesteps. Applying it in both places changes
         # all four timesteps.
-        self.modules["scheduler"] = MinWMFlowUniPCParityScheduler(
+        self.modules["scheduler"] = ZingFlowUniPCParityScheduler(
             num_train_timesteps=1000,
             shift=1.0,
             use_dynamic_shifting=False,
@@ -153,11 +153,11 @@ class MinWMCausalUniPCPipeline(MinWMCausalDMDPipeline):
         self.add_stage(
             TimestepPreparationStage(
                 self.get_module("scheduler"),
-                prepare_extra_set_timesteps_kwargs=[_minwm_unipc_shift],
+                prepare_extra_set_timesteps_kwargs=[_zing_unipc_shift],
             )
         )
-        self.add_stage(MinWMChunkLatentPreparationStage(self.get_module("transformer")))
-        denoising_stage = MinWMCausalUniPCDenoisingStage(
+        self.add_stage(ZingChunkLatentPreparationStage(self.get_module("transformer")))
+        denoising_stage = ZingCausalUniPCDenoisingStage(
             transformer=self.get_module("transformer"),
             scheduler=self.get_module("scheduler"),
         )
@@ -166,21 +166,7 @@ class MinWMCausalUniPCPipeline(MinWMCausalDMDPipeline):
         self._add_realtime_output_stage()
 
 
-class ZingCausalDMDPipeline(MinWMCausalDMDPipeline):
-    """Public Zing-0.5 name for the checkpoint-compatible pipeline."""
-
-    pipeline_name = "ZingCausalDMDPipeline"
-
-
-class ZingCausalUniPCPipeline(MinWMCausalUniPCPipeline):
-    """Public Zing-0.5 name for the UniPC compatibility pipeline."""
-
-    pipeline_name = "ZingCausalUniPCPipeline"
-
-
 EntryClass = [
     ZingCausalDMDPipeline,
     ZingCausalUniPCPipeline,
-    MinWMCausalDMDPipeline,
-    MinWMCausalUniPCPipeline,
 ]

@@ -1,5 +1,5 @@
 # Copyright 2026 Seedleap.ai
-# Adapted from the Apache-2.0 minWM action-conditioning implementation.
+# Adapted from the Apache-2.0 Zing action-conditioning implementation.
 # SPDX-License-Identifier: Apache-2.0
 """Zing primitive-token action ontology and conditioner."""
 
@@ -69,7 +69,7 @@ def key_state_to_action_label(keys: list[str]) -> int:
         key = str(raw_key).lower().strip()
         if key not in _KEY_TO_BIT:
             raise ValueError(
-                f"unknown MinWM action key {raw_key!r}; valid keys: "
+                f"unknown Zing action key {raw_key!r}; valid keys: "
                 f"{sorted(_KEY_TO_BIT)}"
             )
         bits[_KEY_TO_BIT[key]] = 1
@@ -77,7 +77,7 @@ def key_state_to_action_label(keys: list[str]) -> int:
     rot = tuple(bits[BITS_PER_SUBSET:])
     if trans not in _TRANS_BITS_TO_LABEL or rot not in _ROT_BITS_TO_LABEL:
         raise ValueError(
-            f"unsupported MinWM action combination {keys!r}; use at most one "
+            f"unsupported Zing action combination {keys!r}; use at most one "
             "forward/backward, one strafe, one pitch, and one yaw key"
         )
     return (
@@ -93,11 +93,11 @@ def validate_action_labels(labels, *, expected_frames: int | None = None) -> lis
         if isinstance(label, bool) or not isinstance(label, int):
             raise ValueError("action_labels must be a list[int]")
         if not 0 <= label < NUM_ACTION_CLASSES:
-            raise ValueError("MinWM action labels must be in [0, 80]")
+            raise ValueError("Zing action labels must be in [0, 80]")
         result.append(label)
     if expected_frames is not None and len(result) != expected_frames:
         raise ValueError(
-            f"expected {expected_frames} MinWM action labels, got {len(result)}"
+            f"expected {expected_frames} Zing action labels, got {len(result)}"
         )
     return result
 
@@ -123,7 +123,7 @@ def validate_action_weights(
         result.append(values)
     if expected_frames is not None and len(result) != expected_frames:
         raise ValueError(
-            f"expected {expected_frames} MinWM action weight rows, got {len(result)}"
+            f"expected {expected_frames} Zing action weight rows, got {len(result)}"
         )
     return result
 
@@ -142,7 +142,7 @@ def action_labels_to_primitive_bits(
 
 def action_sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Tensor:
     if dim % 2:
-        raise ValueError("MinWM action sinusoidal embedding dimension must be even")
+        raise ValueError("Zing action sinusoidal embedding dimension must be even")
     half = dim // 2
     position = position.to(torch.float64).mul(1000.0)
     sinusoid = torch.outer(
@@ -178,7 +178,7 @@ class CausalActionTemporalBlock(nn.Module):
 
 
 class PrimitiveTokenResidualActionEncoder(nn.Module):
-    """Exact `primitive_token_residual` module used by minWM main."""
+    """Exact `primitive_token_residual` module used by Zing main."""
 
     def __init__(
         self,
@@ -227,7 +227,7 @@ class PrimitiveTokenResidualActionEncoder(nn.Module):
             weights = action
         else:
             raise ValueError(
-                "MinWM action must have shape [B, F] labels or [B, F, S, 8] weights"
+                "Zing action must have shape [B, F] labels or [B, F, S, 8] weights"
             )
         weights = weights.to(
             device=self.move_embedding.weight.device,
@@ -253,11 +253,11 @@ class PrimitiveTokenResidualActionEncoder(nn.Module):
     ) -> torch.Tensor:
         if action.ndim not in (2, 4):
             raise ValueError(
-                "MinWM action tensor must have shape [B, F] or [B, F, S, 8]"
+                "Zing action tensor must have shape [B, F] or [B, F, S, 8]"
             )
         if action.shape[1] < num_current_frames:
             raise ValueError(
-                "MinWM action window is shorter than the current latent chunk"
+                "Zing action window is shorter than the current latent chunk"
             )
         states = self.frame_states(action)[:, -num_current_frames:]
         return (
@@ -270,7 +270,7 @@ class PrimitiveTokenResidualActionEncoder(nn.Module):
 
 
 class PrimitiveRoPETokenResidualActionEncoder(nn.Module):
-    """Exact ``primitive_rope_token_residual`` conditioner from minWM."""
+    """Exact ``primitive_rope_token_residual`` conditioner from Zing."""
 
     def __init__(
         self,
@@ -283,7 +283,7 @@ class PrimitiveRoPETokenResidualActionEncoder(nn.Module):
         super().__init__()
         if embed_dim % (2 * BITS_PER_SUBSET):
             raise ValueError(
-                "MinWM primitive RoPE embed_dim must be divisible by "
+                "Zing primitive RoPE embed_dim must be divisible by "
                 f"{2 * BITS_PER_SUBSET}"
             )
         self.embed_dim = embed_dim
@@ -321,7 +321,7 @@ class PrimitiveRoPETokenResidualActionEncoder(nn.Module):
             weights = action
         else:
             raise ValueError(
-                "MinWM primitive RoPE action must have shape [B, F] labels "
+                "Zing primitive RoPE action must have shape [B, F] labels "
                 "or [B, F, S, 8] weights"
             )
         weights = weights.to(device=self.proj.weight.device, dtype=torch.float32)
@@ -350,7 +350,7 @@ class PrimitiveRoPETokenResidualActionEncoder(nn.Module):
     ) -> torch.Tensor:
         if action.shape[1] < num_current_frames:
             raise ValueError(
-                "MinWM action window is shorter than the current latent chunk"
+                "Zing action window is shorter than the current latent chunk"
             )
         states = self.frame_states(action)[:, -num_current_frames:]
         return (

@@ -4,10 +4,10 @@ import pytest
 import torch
 
 from sglang.kernels.ops.diffusion.rope.zing_rotary_jit import (
-    can_use_minwm_rotary,
-    can_use_minwm_rotary_out,
-    minwm_rotary,
-    minwm_rotary_out,
+    can_use_zing_rotary,
+    can_use_zing_rotary_out,
+    zing_rotary,
+    zing_rotary_out,
 )
 from sglang.test.ci.ci_register import register_cuda_ci
 
@@ -77,13 +77,13 @@ def hopper_setup():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     if torch.cuda.get_device_capability() != (9, 0):
-        pytest.skip("MinWM rotary fast path targets Hopper SM90")
+        pytest.skip("Zing rotary fast path targets Hopper SM90")
     torch.cuda.manual_seed(0)
 
 
 @pytest.mark.parametrize("sequence_length", PRODUCTION_SEQUENCE_LENGTHS)
 @pytest.mark.parametrize("num_heads", PRODUCTION_NUM_HEADS)
-def test_minwm_rotary_matches_production_bf16_shapes(sequence_length, num_heads):
+def test_zing_rotary_matches_production_bf16_shapes(sequence_length, num_heads):
     hidden = torch.randn(
         1,
         sequence_length,
@@ -96,8 +96,8 @@ def test_minwm_rotary_matches_production_bf16_shapes(sequence_length, num_heads)
     cos = angles.cos()
     sin = angles.sin()
 
-    assert can_use_minwm_rotary(hidden, cos, sin)
-    actual = minwm_rotary(hidden, cos, sin)
+    assert can_use_zing_rotary(hidden, cos, sin)
+    actual = zing_rotary(hidden, cos, sin)
     expected = _torch_reference(hidden, cos, sin)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
@@ -106,7 +106,7 @@ def test_minwm_rotary_matches_production_bf16_shapes(sequence_length, num_heads)
     ("sequence_length", "num_heads"),
     [(5, 3), (1560, 6), (28160, 24)],
 )
-def test_minwm_rotary_matches_explicit_fp32_formula_fp16(sequence_length, num_heads):
+def test_zing_rotary_matches_explicit_fp32_formula_fp16(sequence_length, num_heads):
     hidden = torch.randn(
         1,
         sequence_length,
@@ -119,8 +119,8 @@ def test_minwm_rotary_matches_explicit_fp32_formula_fp16(sequence_length, num_he
     cos = angles.cos()
     sin = angles.sin()
 
-    assert can_use_minwm_rotary(hidden, cos, sin)
-    actual = minwm_rotary(hidden, cos, sin)
+    assert can_use_zing_rotary(hidden, cos, sin)
+    actual = zing_rotary(hidden, cos, sin)
     expected = _torch_reference(hidden, cos, sin)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
@@ -130,7 +130,7 @@ def test_minwm_rotary_matches_explicit_fp32_formula_fp16(sequence_length, num_he
     ("sequence_length", "num_heads"),
     BOUNDARY_CASES + RESOLUTION_TAIL_AND_LONG_CASES,
 )
-def test_minwm_rotary_matches_boundary_tail_and_long_shapes(
+def test_zing_rotary_matches_boundary_tail_and_long_shapes(
     dtype, sequence_length, num_heads
 ):
     hidden = torch.randn(
@@ -145,8 +145,8 @@ def test_minwm_rotary_matches_boundary_tail_and_long_shapes(
     cos = angles.cos()
     sin = angles.sin()
 
-    assert can_use_minwm_rotary(hidden, cos, sin)
-    actual = minwm_rotary(hidden, cos, sin)
+    assert can_use_zing_rotary(hidden, cos, sin)
+    actual = zing_rotary(hidden, cos, sin)
     expected = _torch_reference(hidden, cos, sin)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
@@ -159,15 +159,15 @@ def test_minwm_rotary_matches_boundary_tail_and_long_shapes(
         (2, 1560, 6, 128),
     ),
 )
-def test_minwm_rotary_matches_multi_batch_prefixes(shape):
+def test_zing_rotary_matches_multi_batch_prefixes(shape):
     hidden = torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
     sequence_length = shape[-3]
     angles = torch.randn(sequence_length, 64, device="cuda", dtype=torch.float32)
     cos = angles.cos()
     sin = angles.sin()
 
-    assert can_use_minwm_rotary(hidden, cos, sin)
-    actual = minwm_rotary(hidden, cos, sin)
+    assert can_use_zing_rotary(hidden, cos, sin)
+    actual = zing_rotary(hidden, cos, sin)
     expected = _torch_reference(hidden, cos, sin)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
@@ -176,7 +176,7 @@ def test_minwm_rotary_matches_multi_batch_prefixes(shape):
     ("sequence_length", "num_heads"),
     [(1560, 6), (3432, 12), (28160, 24)],
 )
-def test_minwm_rotary_out_matches_explicit_fp32_formula(sequence_length, num_heads):
+def test_zing_rotary_out_matches_explicit_fp32_formula(sequence_length, num_heads):
     hidden = torch.randn(
         1,
         sequence_length,
@@ -190,29 +190,29 @@ def test_minwm_rotary_out_matches_explicit_fp32_formula(sequence_length, num_hea
     sin = angles.sin()
     output = torch.empty_like(hidden)
 
-    assert can_use_minwm_rotary_out(hidden, cos, sin, output)
-    actual = minwm_rotary_out(hidden, cos, sin, output)
+    assert can_use_zing_rotary_out(hidden, cos, sin, output)
+    actual = zing_rotary_out(hidden, cos, sin, output)
     expected = _torch_reference(hidden, cos, sin)
     assert actual is output
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-def test_minwm_rotary_rejects_noncontiguous_tables():
+def test_zing_rotary_rejects_noncontiguous_tables():
     hidden = torch.randn(1, 5, 24, 128, device="cuda", dtype=torch.bfloat16)
     angles = torch.randn(5, 128, device="cuda", dtype=torch.float32)
     cos = angles[:, 0::2]
     sin = angles[:, 1::2]
 
-    assert not can_use_minwm_rotary(hidden, cos, sin)
+    assert not can_use_zing_rotary(hidden, cos, sin)
 
 
-def test_minwm_rotary_custom_op_torch_compile_fullgraph():
+def test_zing_rotary_custom_op_torch_compile_fullgraph():
     hidden = torch.randn(1, 32, 24, 128, device="cuda", dtype=torch.bfloat16)
     angles = torch.randn(32, 64, device="cuda", dtype=torch.float32)
     cos = angles.cos()
     sin = angles.sin()
 
-    compiled = torch.compile(minwm_rotary, fullgraph=True)
+    compiled = torch.compile(zing_rotary, fullgraph=True)
     actual = compiled(hidden, cos, sin)
     expected = _torch_reference(hidden, cos, sin)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)

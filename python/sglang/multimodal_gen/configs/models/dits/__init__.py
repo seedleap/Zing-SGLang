@@ -23,7 +23,7 @@ from sglang.multimodal_gen.configs.models.dits.stablediffusion3 import (
     StableDiffusion3TransformerConfig,
 )
 from sglang.multimodal_gen.configs.models.dits.wanvideo import WanVideoConfig
-from sglang.multimodal_gen.configs.models.dits.zing import MinWMVideoConfig
+from sglang.multimodal_gen.configs.models.dits.zing import ZingVideoConfig
 
 __all__ = [
     "Cosmos3VideoConfig",
@@ -32,7 +32,7 @@ __all__ = [
     "Ideogram4DiTConfig",
     "Ideogram4DistilledDiTConfig",
     "LingBotWorldVideoConfig",
-    "MinWMVideoConfig",
+    "ZingVideoConfig",
     "LingBotVideoMoEConfig",
     "LongLive2VideoConfig",
     "MiniMaxH3DiTConfig",

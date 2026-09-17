@@ -5,13 +5,13 @@ from dataclasses import dataclass, field
 
 from sglang.multimodal_gen.configs.sample.wan import Wan2_2_TI2V_5B_SamplingParam
 from sglang.multimodal_gen.configs.zing_resolution_buckets import (
-    MINWM_RESOLUTION_BUCKETS,
-    normalize_minwm_resolution_buckets,
+    ZING_RESOLUTION_BUCKETS,
+    normalize_zing_resolution_buckets,
 )
 
 
 @dataclass
-class MinWMSamplingParams(Wan2_2_TI2V_5B_SamplingParam):
+class ZingSamplingParams(Wan2_2_TI2V_5B_SamplingParam):
     height: int = 480
     width: int = 832
     num_frames: int = 1
@@ -29,9 +29,9 @@ class MinWMSamplingParams(Wan2_2_TI2V_5B_SamplingParam):
             None,
         )
         if configured_buckets is not None:
-            bucket_names = normalize_minwm_resolution_buckets(str(configured_buckets))
+            bucket_names = normalize_zing_resolution_buckets(str(configured_buckets))
             self.supported_resolutions = [
-                MINWM_RESOLUTION_BUCKETS[name] for name in bucket_names
+                ZING_RESOLUTION_BUCKETS[name] for name in bucket_names
             ]
             if (
                 self.width is not None
@@ -42,7 +42,7 @@ class MinWMSamplingParams(Wan2_2_TI2V_5B_SamplingParam):
                     f"{width}x{height}" for width, height in self.supported_resolutions
                 )
                 raise ValueError(
-                    "MinWM request resolution is not enabled by the launch "
+                    "Zing request resolution is not enabled by the launch "
                     f"profile: {self.width}x{self.height}; supported={supported}"
                 )
 
@@ -50,7 +50,7 @@ class MinWMSamplingParams(Wan2_2_TI2V_5B_SamplingParam):
         sp_degree = getattr(server_args, "sp_degree", 1) or 1
         if sp_degree > 1 and enable_sequence_shard is False:
             raise ValueError(
-                "MinWM with sp_degree > 1 requires enable_sequence_shard=True."
+                "Zing with sp_degree > 1 requires enable_sequence_shard=True."
             )
         if enable_sequence_shard is None or enable_sequence_shard:
             self.adjust_frames = False

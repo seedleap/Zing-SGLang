@@ -1,5 +1,5 @@
 # Copyright 2026 Seedleap.ai
-# Adapted from the Apache-2.0 minWM and Wan implementations.
+# Adapted from the Apache-2.0 Zing and Wan implementations.
 # SPDX-License-Identifier: Apache-2.0
 """Wan2.2-5B causal transformer with Zing action conditioning."""
 
@@ -17,19 +17,19 @@ import torch.nn.functional as F
 from torch import nn
 
 from sglang.kernels.ops.diffusion.norm.zing_rmsnorm_jit import (
-    can_use_minwm_rmsnorm,
-    minwm_fused_qknorm,
-    minwm_fused_qknorm_unchecked,
-    minwm_rmsnorm,
-    minwm_rmsnorm_unchecked,
+    can_use_zing_rmsnorm,
+    zing_fused_qknorm,
+    zing_fused_qknorm_unchecked,
+    zing_rmsnorm,
+    zing_rmsnorm_unchecked,
 )
 from sglang.kernels.ops.diffusion.rope.zing_rotary_jit import (
-    can_use_minwm_rotary,
-    can_use_minwm_rotary_out,
-    minwm_rotary,
-    minwm_rotary_out,
+    can_use_zing_rotary,
+    can_use_zing_rotary_out,
+    zing_rotary,
+    zing_rotary_out,
 )
-from sglang.multimodal_gen.configs.models.dits.zing import MinWMVideoConfig
+from sglang.multimodal_gen.configs.models.dits.zing import ZingVideoConfig
 from sglang.multimodal_gen.runtime.distributed import (
     get_sp_group,
     get_sp_parallel_rank,
@@ -71,8 +71,8 @@ from sglang.multimodal_gen.runtime.models.dits.zing_action import (
     PrimitiveTokenResidualActionEncoder,
 )
 from sglang.multimodal_gen.runtime.models.dits.zing_kv_cache import (
-    MinWMCausalAttentionKVPlan,
-    MinWMCausalSelfAttentionKVCache,
+    ZingCausalAttentionKVPlan,
+    ZingCausalSelfAttentionKVCache,
 )
 from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
@@ -89,30 +89,30 @@ def _env_flag(name: str, default: bool) -> bool:
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
-_MINWM_ATTENTION_IMPL = os.environ.get("MINWM_ATTENTION_IMPL", "packed").strip().lower()
-_MINWM_PACKED_ATTENTION_DETERMINISTIC = _env_flag(
-    "MINWM_PACKED_ATTENTION_DETERMINISTIC", True
+_ZING_ATTENTION_IMPL = os.environ.get("ZING_ATTENTION_IMPL", "packed").strip().lower()
+_ZING_PACKED_ATTENTION_DETERMINISTIC = _env_flag(
+    "ZING_PACKED_ATTENTION_DETERMINISTIC", True
 )
-_MINWM_SEGMENT_COMPILE = _env_flag("MINWM_SEGMENT_COMPILE", True)
-_MINWM_CUDA_GRAPH_ACTIVE = False
-_MINWM_CACHE_ROTATED_K = _env_flag("MINWM_CACHE_ROTATED_K", True)
-_MINWM_PRECOMPUTE_CACHE_ROPE = _env_flag("MINWM_PRECOMPUTE_CACHE_ROPE", True)
-_MINWM_CACHE_PACKED_METADATA = _env_flag("MINWM_CACHE_PACKED_METADATA", True)
-_MINWM_RMSNORM_IMPL = os.environ.get("MINWM_RMSNORM_IMPL", "auto").strip().lower()
-_MINWM_PARITY_DETERMINISTIC = _env_flag("MINWM_PARITY_DETERMINISTIC", False)
-_MINWM_ANNOUNCED_ATTENTION_BACKENDS: set[tuple[str, str]] = set()
+_ZING_SEGMENT_COMPILE = _env_flag("ZING_SEGMENT_COMPILE", True)
+_ZING_CUDA_GRAPH_ACTIVE = False
+_ZING_CACHE_ROTATED_K = _env_flag("ZING_CACHE_ROTATED_K", True)
+_ZING_PRECOMPUTE_CACHE_ROPE = _env_flag("ZING_PRECOMPUTE_CACHE_ROPE", True)
+_ZING_CACHE_PACKED_METADATA = _env_flag("ZING_CACHE_PACKED_METADATA", True)
+_ZING_RMSNORM_IMPL = os.environ.get("ZING_RMSNORM_IMPL", "auto").strip().lower()
+_ZING_PARITY_DETERMINISTIC = _env_flag("ZING_PARITY_DETERMINISTIC", False)
+_ZING_ANNOUNCED_ATTENTION_BACKENDS: set[tuple[str, str]] = set()
 
 
-def _minwm_should_use_jit_rmsnorm(
+def _zing_should_use_jit_rmsnorm(
     hidden_states: torch.Tensor, weight: torch.Tensor
 ) -> bool:
-    enabled = _MINWM_RMSNORM_IMPL == "jit" or (
-        _MINWM_RMSNORM_IMPL == "auto" and not _MINWM_PARITY_DETERMINISTIC
+    enabled = _ZING_RMSNORM_IMPL == "jit" or (
+        _ZING_RMSNORM_IMPL == "auto" and not _ZING_PARITY_DETERMINISTIC
     )
-    return enabled and can_use_minwm_rmsnorm(hidden_states, weight)
+    return enabled and can_use_zing_rmsnorm(hidden_states, weight)
 
 
-class _MinWMUlyssesWorkspace:
+class _ZingUlyssesWorkspace:
     """Reusable communication buffers shared by the sequential transformer blocks."""
 
     def __init__(self) -> None:
@@ -137,7 +137,7 @@ class _MinWMUlyssesWorkspace:
 
 
 @torch.compiler.disable
-def _minwm_update_and_get_attention_kv(
+def _zing_update_and_get_attention_kv(
     kv_cache,
     *,
     key: torch.Tensor,
@@ -145,18 +145,18 @@ def _minwm_update_and_get_attention_kv(
     current_chunk_start: int,
     cache_head_start: int | None,
 ):
-    """Keep MinWM's stateful bounded-cache update outside whole-DiT compile."""
+    """Keep Zing's stateful bounded-cache update outside whole-DiT compile."""
     return kv_cache.update_and_get_attention_kv(
         key=key,
         value=value,
         current_chunk_start=current_chunk_start,
         cache_head_start=cache_head_start,
-        debug_name="MinWM causal KV cache",
+        debug_name="Zing causal KV cache",
     )
 
 
-class _MinWMTimestepEmbedder(TimestepEmbedder):
-    """Use minWM's float64 sinusoid construction before the checkpoint MLP."""
+class _ZingTimestepEmbedder(TimestepEmbedder):
+    """Use Zing's float64 sinusoid construction before the checkpoint MLP."""
 
     def forward(
         self, timestep: torch.Tensor, timestep_seq_len: int | None = None
@@ -179,8 +179,8 @@ class _MinWMTimestepEmbedder(TimestepEmbedder):
         return self.mlp(embedding)
 
 
-class MinWMPatchEmbed(PatchEmbed):
-    """Use minWM main's native Conv3d instead of the linearized fast path."""
+class ZingPatchEmbed(PatchEmbed):
+    """Use Zing main's native Conv3d instead of the linearized fast path."""
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.proj(hidden_states)
@@ -189,8 +189,8 @@ class MinWMPatchEmbed(PatchEmbed):
         return self.norm(hidden_states)
 
 
-class MinWMRMSNorm(nn.Module):
-    """Match minWM's BF16 rounding boundary before the learned weight."""
+class ZingRMSNorm(nn.Module):
+    """Match Zing's BF16 rounding boundary before the learned weight."""
 
     def __init__(self, dim: int, eps: float = 1e-5) -> None:
         super().__init__()
@@ -198,14 +198,14 @@ class MinWMRMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if _minwm_should_use_jit_rmsnorm(hidden_states, self.weight):
+        if _zing_should_use_jit_rmsnorm(hidden_states, self.weight):
             rmsnorm = (
-                minwm_rmsnorm
+                zing_rmsnorm
                 if torch.compiler.is_compiling()
-                else minwm_rmsnorm_unchecked
+                else zing_rmsnorm_unchecked
             )
             return rmsnorm(hidden_states, self.weight, self.eps)
-        return _MinWMSegmentCompile.get(MinWMRMSNorm._norm, hidden_states.is_cuda)(
+        return _ZingSegmentCompile.get(ZingRMSNorm._norm, hidden_states.is_cuda)(
             hidden_states, self.weight, self.eps
         )
 
@@ -220,14 +220,14 @@ class MinWMRMSNorm(nn.Module):
         return normalized.type_as(hidden_states) * weight
 
 
-class _MinWMSegmentCompile:
-    """Mirror minWM main's shared, dynamic segment-compile cache."""
+class _ZingSegmentCompile:
+    """Mirror Zing main's shared, dynamic segment-compile cache."""
 
     _compiled = {}
 
     @classmethod
     def get(cls, function, use_compile: bool):
-        if not use_compile or not _MINWM_SEGMENT_COMPILE or _MINWM_CUDA_GRAPH_ACTIVE:
+        if not use_compile or not _ZING_SEGMENT_COMPILE or _ZING_CUDA_GRAPH_ACTIVE:
             return function
         if function not in cls._compiled:
             kwargs = {}
@@ -241,30 +241,30 @@ class _MinWMSegmentCompile:
         return cls._compiled[function]
 
 
-def set_minwm_cuda_graph_active(enabled: bool) -> None:
+def set_zing_cuda_graph_active(enabled: bool) -> None:
     """Keep lazily compiled Inductor segments out of manual DiT capture.
 
     Segment compilation can allocate or compile on its first invocation, which
-    is unsafe inside CUDA Graph capture. It can also change MinWM's BF16 rounding
+    is unsafe inside CUDA Graph capture. It can also change Zing's BF16 rounding
     boundaries, so the graph and eager benchmark lanes both use eager segments.
     """
-    global _MINWM_CUDA_GRAPH_ACTIVE
+    global _ZING_CUDA_GRAPH_ACTIVE
     enabled = bool(enabled)
-    if enabled == _MINWM_CUDA_GRAPH_ACTIVE:
+    if enabled == _ZING_CUDA_GRAPH_ACTIVE:
         return
-    _MINWM_CUDA_GRAPH_ACTIVE = enabled
-    if enabled and _MINWM_SEGMENT_COMPILE:
-        logger.info("MinWM CUDA graph disables nested segment torch.compile for parity")
+    _ZING_CUDA_GRAPH_ACTIVE = enabled
+    if enabled and _ZING_SEGMENT_COMPILE:
+        logger.info("Zing CUDA graph disables nested segment torch.compile for parity")
 
 
-def apply_minwm_rotary_embedding(
+def apply_zing_rotary_embedding(
     hidden_states: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> torch.Tensor:
-    """Apply minWM's explicit FP32 interleaved RoPE arithmetic."""
-    if can_use_minwm_rotary(hidden_states, cos, sin):
-        return minwm_rotary(hidden_states, cos, sin)
+    """Apply Zing's explicit FP32 interleaved RoPE arithmetic."""
+    if can_use_zing_rotary(hidden_states, cos, sin):
+        return zing_rotary(hidden_states, cos, sin)
 
     sequence_length = hidden_states.shape[-3]
     half_head_dim = hidden_states.shape[-1] // 2
@@ -287,38 +287,38 @@ def apply_minwm_rotary_embedding(
     )
 
 
-def apply_minwm_rotary_embedding_out(
+def apply_zing_rotary_embedding_out(
     hidden_states: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
     output: torch.Tensor,
 ) -> torch.Tensor:
-    """Apply exact MinWM RoPE into a caller-owned cache tensor when supported."""
-    if can_use_minwm_rotary_out(hidden_states, cos, sin, output):
-        return minwm_rotary_out(hidden_states, cos, sin, output)
-    output.copy_(apply_minwm_rotary_embedding(hidden_states, cos, sin).type_as(output))
+    """Apply exact Zing RoPE into a caller-owned cache tensor when supported."""
+    if can_use_zing_rotary_out(hidden_states, cos, sin, output):
+        return zing_rotary_out(hidden_states, cos, sin, output)
+    output.copy_(apply_zing_rotary_embedding(hidden_states, cos, sin).type_as(output))
     return output
 
 
-def _minwm_layer_norm(
+def _zing_layer_norm(
     hidden_states: torch.Tensor,
     *,
     eps: float,
     weight: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Match ``WanLayerNorm._norm`` from minWM main."""
-    # minWM casts the entire generator to BF16 before inference. Keep that cast
+    """Match ``WanLayerNorm._norm`` from Zing main."""
+    # Zing casts the entire generator to BF16 before inference. Keep that cast
     # outside the compiled function so its graph and operand dtypes match
     # WanLayerNorm._norm exactly.
     weight = weight.to(hidden_states.dtype) if weight is not None else None
     bias = bias.to(hidden_states.dtype) if bias is not None else None
-    return _MinWMSegmentCompile.get(_minwm_layer_norm_op, hidden_states.is_cuda)(
+    return _ZingSegmentCompile.get(_zing_layer_norm_op, hidden_states.is_cuda)(
         hidden_states, weight, bias, eps
     )
 
 
-def _minwm_layer_norm_op(
+def _zing_layer_norm_op(
     hidden_states: torch.Tensor,
     weight: torch.Tensor | None,
     bias: torch.Tensor | None,
@@ -333,7 +333,7 @@ def _minwm_layer_norm_op(
     ).type_as(hidden_states)
 
 
-def _minwm_adaln_op(
+def _zing_adaln_op(
     x: torch.Tensor,
     m_shift: torch.Tensor | None = None,
     m_scale: torch.Tensor | None = None,
@@ -348,7 +348,7 @@ def _minwm_adaln_op(
     bias: torch.Tensor | None = None,
     cast_norm: bool = False,
 ):
-    """Source-shaped copy of minWM main's compiled ``adaln_op``."""
+    """Source-shaped copy of Zing main's compiled ``adaln_op``."""
     if y is not None:
         x = (x.float() + y.float() * (m_gate.float() + e_gate.float())).type_as(x)
     if r is not None:
@@ -369,13 +369,13 @@ def _minwm_adaln_op(
     return x, (h * (1 + scale.float()) + shift.float()).type_as(x)
 
 
-def _minwm_adaln(hidden_states: torch.Tensor, *args, **kwargs):
-    return _MinWMSegmentCompile.get(_minwm_adaln_op, hidden_states.is_cuda)(
+def _zing_adaln(hidden_states: torch.Tensor, *args, **kwargs):
+    return _ZingSegmentCompile.get(_zing_adaln_op, hidden_states.is_cuda)(
         hidden_states, *args, **kwargs
     )
 
 
-def _minwm_frame_indices(hidden_states: torch.Tensor, num_frames: int) -> torch.Tensor:
+def _zing_frame_indices(hidden_states: torch.Tensor, num_frames: int) -> torch.Tensor:
     """Map each local token to its frame, including shards cut inside a frame."""
     forward_batch = get_forward_context().forward_batch
     if (
@@ -386,12 +386,12 @@ def _minwm_frame_indices(hidden_states: torch.Tensor, num_frames: int) -> torch.
         frame_indices = getattr(forward_batch, "sequence_shard_frame_indices", None)
         if frame_indices is None:
             raise ValueError(
-                "MinWM sequence sharding requires "
+                "Zing sequence sharding requires "
                 "forward_batch.sequence_shard_frame_indices."
             )
         if frame_indices.numel() != hidden_states.shape[1]:
             raise ValueError(
-                "MinWM sequence shard frame indices do not match the local "
+                "Zing sequence shard frame indices do not match the local "
                 f"sequence length: {frame_indices.numel()} vs "
                 f"{hidden_states.shape[1]}."
             )
@@ -401,16 +401,16 @@ def _minwm_frame_indices(hidden_states: torch.Tensor, num_frames: int) -> torch.
 
     if hidden_states.shape[1] % num_frames != 0:
         raise ValueError(
-            f"MinWM sequence length {hidden_states.shape[1]} must be divisible "
+            f"Zing sequence length {hidden_states.shape[1]} must be divisible "
             f"by num_frames {num_frames} when sequence sharding is disabled."
         )
-    return _minwm_uniform_frame_indices(
+    return _zing_uniform_frame_indices(
         hidden_states.shape[1], num_frames, hidden_states.device
     )
 
 
 @lru_cache(maxsize=32)
-def _minwm_uniform_frame_indices(
+def _zing_uniform_frame_indices(
     sequence_length: int,
     num_frames: int,
     device: torch.device,
@@ -419,7 +419,7 @@ def _minwm_uniform_frame_indices(
     return torch.arange(num_frames, device=device).repeat_interleave(tokens_per_frame)
 
 
-def _minwm_qk_norm_rope_op(
+def _zing_qk_norm_rope_op(
     query: torch.Tensor,
     key: torch.Tensor,
     query_weight: torch.Tensor,
@@ -428,7 +428,7 @@ def _minwm_qk_norm_rope_op(
     rope: torch.Tensor,
     num_heads: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    query, key = _minwm_qk_norm_op(query, key, query_weight, key_weight, eps, num_heads)
+    query, key = _zing_qk_norm_op(query, key, query_weight, key_weight, eps, num_heads)
 
     def apply(hidden_states: torch.Tensor) -> torch.Tensor:
         sequence_length = hidden_states.shape[-3]
@@ -441,12 +441,12 @@ def _minwm_qk_norm_rope_op(
             2,
         )
         cos, sin = shaped_rope[..., 0], shaped_rope[..., 1]
-        return apply_minwm_rotary_embedding(hidden_states, cos, sin)
+        return apply_zing_rotary_embedding(hidden_states, cos, sin)
 
     return apply(query), apply(key)
 
 
-def _minwm_qk_norm_op(
+def _zing_qk_norm_op(
     query: torch.Tensor,
     key: torch.Tensor,
     query_weight: torch.Tensor,
@@ -454,61 +454,61 @@ def _minwm_qk_norm_op(
     eps: float,
     num_heads: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if _minwm_should_use_jit_rmsnorm(
+    if _zing_should_use_jit_rmsnorm(
         query, query_weight
-    ) and _minwm_should_use_jit_rmsnorm(key, key_weight):
+    ) and _zing_should_use_jit_rmsnorm(key, key_weight):
         qknorm = (
-            minwm_fused_qknorm
+            zing_fused_qknorm
             if torch.compiler.is_compiling()
-            else minwm_fused_qknorm_unchecked
+            else zing_fused_qknorm_unchecked
         )
         query, key = qknorm(query, key, query_weight, key_weight, eps)
     else:
-        query = MinWMRMSNorm._norm(query, query_weight, eps)
-        key = MinWMRMSNorm._norm(key, key_weight, eps)
+        query = ZingRMSNorm._norm(query, query_weight, eps)
+        key = ZingRMSNorm._norm(key, key_weight, eps)
     *leading, dim = query.shape
     query = query.reshape(*leading, num_heads, dim // num_heads)
     key = key.reshape(*leading, num_heads, dim // num_heads)
     return query, key
 
 
-def _minwm_apply_qk_op(
+def _zing_apply_qk_op(
     qk_op,
     qk_args: list,
     *,
     use_cache: bool,
     use_compile: bool,
 ):
-    """Keep cache inference eager, matching minWM main's BF16 reduction."""
+    """Keep cache inference eager, matching Zing main's BF16 reduction."""
     if use_cache:
         return qk_op(*qk_args)
-    return _MinWMSegmentCompile.get(qk_op, use_compile)(*qk_args)
+    return _ZingSegmentCompile.get(qk_op, use_compile)(*qk_args)
 
 
 @torch.compiler.disable
-def _minwm_packed_varlen_attention(
+def _zing_packed_varlen_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
 ) -> torch.Tensor:
-    """Call the same device-selected packed-varlen backend as minWM main.
+    """Call the same device-selected packed-varlen backend as Zing main.
 
     Keep the packed FlashAttention boundary eager when the enclosing DiT is
     compiled. FA4 already supplies the fused kernel; fixed-shape cu-seqlens are
     cached separately so this boundary performs no metadata kernels.
     """
     if query.device.type != "cuda":
-        raise RuntimeError("MinWM packed-varlen attention requires CUDA")
+        raise RuntimeError("Zing packed-varlen attention requires CUDA")
     batch_size, query_length, num_heads, head_dim = query.shape
     key_length = key.shape[1]
     if key.shape != value.shape or key.shape[0] != batch_size:
-        raise ValueError("MinWM attention key/value shapes must match")
+        raise ValueError("Zing attention key/value shapes must match")
     if key.shape[2:] != (num_heads, head_dim):
-        raise ValueError("MinWM attention Q/K/V head geometry must match")
+        raise ValueError("Zing attention Q/K/V head geometry must match")
 
-    if _MINWM_CACHE_PACKED_METADATA:
-        cu_query = _minwm_uniform_cu_seqlens(batch_size, query_length, query.device)
-        cu_key = _minwm_uniform_cu_seqlens(batch_size, key_length, key.device)
+    if _ZING_CACHE_PACKED_METADATA:
+        cu_query = _zing_uniform_cu_seqlens(batch_size, query_length, query.device)
+        cu_key = _zing_uniform_cu_seqlens(batch_size, key_length, key.device)
     else:
         query_lengths = torch.full(
             (batch_size,), query_length, dtype=torch.int32, device=query.device
@@ -518,13 +518,13 @@ def _minwm_packed_varlen_attention(
         )
         cu_query = F.pad(query_lengths.cumsum(0), (1, 0)).to(torch.int32)
         cu_key = F.pad(key_lengths.cumsum(0), (1, 0)).to(torch.int32)
-    backend = _minwm_packed_attention_backend(query.device)
+    backend = _zing_packed_attention_backend(query.device)
     announce_key = (backend, str(query.device))
-    if announce_key not in _MINWM_ANNOUNCED_ATTENTION_BACKENDS:
+    if announce_key not in _ZING_ANNOUNCED_ATTENTION_BACKENDS:
         logger.info(
-            "MinWM packed-varlen attention backend=%s device=%s", backend, query.device
+            "Zing packed-varlen attention backend=%s device=%s", backend, query.device
         )
-        _MINWM_ANNOUNCED_ATTENTION_BACKENDS.add(announce_key)
+        _ZING_ANNOUNCED_ATTENTION_BACKENDS.add(announce_key)
 
     common_kwargs = {
         "q": query.reshape(batch_size * query_length, num_heads, head_dim),
@@ -542,7 +542,7 @@ def _minwm_packed_varlen_attention(
 
         output = flash_attn_varlen_func(
             **common_kwargs,
-            deterministic=_MINWM_PACKED_ATTENTION_DETERMINISTIC,
+            deterministic=_ZING_PACKED_ATTENTION_DETERMINISTIC,
             window_size=(None, None),
             return_lse=False,
         )
@@ -561,7 +561,7 @@ def _minwm_packed_varlen_attention(
 
         output = flash_attn.flash_attn_varlen_func(
             **common_kwargs,
-            deterministic=_MINWM_PACKED_ATTENTION_DETERMINISTIC,
+            deterministic=_ZING_PACKED_ATTENTION_DETERMINISTIC,
             dropout_p=0.0,
             window_size=(-1, -1),
         )
@@ -571,7 +571,7 @@ def _minwm_packed_varlen_attention(
 
 
 @lru_cache(maxsize=128)
-def _minwm_uniform_cu_seqlens(
+def _zing_uniform_cu_seqlens(
     batch_size: int,
     sequence_length: int,
     device: torch.device,
@@ -582,14 +582,14 @@ def _minwm_uniform_cu_seqlens(
     )
 
 
-def _minwm_packed_attention_backend(device: torch.device) -> str:
+def _zing_packed_attention_backend(device: torch.device) -> str:
     """Select the device-compatible backend and require FA3 on Hopper."""
     capability = torch.cuda.get_device_capability(device)[0]
     if capability >= 10 and importlib.util.find_spec("flash_attn.cute") is not None:
         return "fa4"
-    if capability == 12 and _env_flag("SGLANG_MINWM_REQUIRE_SM120_FA4", False):
+    if capability == 12 and _env_flag("SGLANG_ZING_REQUIRE_SM120_FA4", False):
         raise RuntimeError(
-            "SGLANG_MINWM_REQUIRE_SM120_FA4=1 requires FlashAttention-4 on SM120"
+            "SGLANG_ZING_REQUIRE_SM120_FA4=1 requires FlashAttention-4 on SM120"
         )
     if capability == 9:
         if (
@@ -597,20 +597,20 @@ def _minwm_packed_attention_backend(device: torch.device) -> str:
             is None
         ):
             raise RuntimeError(
-                "minWM requires the bundled FlashAttention-3 backend on Hopper"
+                "Zing requires the bundled FlashAttention-3 backend on Hopper"
             )
         return "fa3"
     if importlib.util.find_spec("flash_attn") is not None:
         return "fa2"
-    raise RuntimeError("No minWM-compatible packed FlashAttention backend is available")
+    raise RuntimeError("No Zing-compatible packed FlashAttention backend is available")
 
 
-class MinWMCausalSelfAttention(CausalWanSelfAttention):
-    """SGLang cache ownership with minWM main's FA4 call shape."""
+class ZingCausalSelfAttention(CausalWanSelfAttention):
+    """SGLang cache ownership with Zing main's FA4 call shape."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.ulysses_workspace: _MinWMUlyssesWorkspace | None = None
+        self.ulysses_workspace: _ZingUlyssesWorkspace | None = None
         ulysses_world_size = max(get_ulysses_parallel_world_size(), 1)
         if self.num_heads % ulysses_world_size != 0:
             raise ValueError(
@@ -618,7 +618,7 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                 f"ulysses_degree ({ulysses_world_size})."
             )
         self.ulysses_num_heads = self.num_heads // ulysses_world_size
-        self._minwm_rotary_emb = NDRotaryEmbedding(
+        self._zing_rotary_emb = NDRotaryEmbedding(
             rope_dim_list=[
                 self.head_dim - 4 * (self.head_dim // 6),
                 2 * (self.head_dim // 6),
@@ -672,10 +672,10 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                 cache_start,
                 qk_already_roped=qk_already_roped,
             )
-        if not isinstance(kv_cache, MinWMCausalSelfAttentionKVCache):
-            raise TypeError("MinWM inference requires its position-aware raw-K cache")
+        if not isinstance(kv_cache, ZingCausalSelfAttentionKVCache):
+            raise TypeError("Zing inference requires its position-aware raw-K cache")
         if qk_already_roped:
-            raise ValueError("MinWM inference cache must receive unrotated Q/K")
+            raise ValueError("Zing inference cache must receive unrotated Q/K")
 
         forward_batch = get_forward_context().forward_batch
         sequence_shard_enabled = (
@@ -689,7 +689,7 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
             seq_splits = getattr(forward_batch, "sequence_shard_splits", None)
             if seq_splits is None:
                 raise ValueError(
-                    "MinWM causal sequence sharding requires "
+                    "Zing causal sequence sharding requires "
                     "forward_batch.sequence_shard_splits."
                 )
             seq_splits = list(seq_splits)
@@ -712,7 +712,7 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                 qkv = _usp_input_all_to_all_varlen_qkv(query, key, value, seq_splits)
             query, key, value = qkv.chunk(3, dim=-1)
 
-        cache_view = _minwm_update_and_get_attention_kv(
+        cache_view = _zing_update_and_get_attention_kv(
             kv_cache,
             key=key,
             value=value,
@@ -720,45 +720,45 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
             cache_head_start=0 if sequence_shard_enabled else self.head_start,
         )
         if cache_view.query_cos is None or cache_view.query_sin is None:
-            query_cos, query_sin = self._minwm_rotary_emb.forward_uncached(
+            query_cos, query_sin = self._zing_rotary_emb.forward_uncached(
                 cache_view.query_position_ids
             )
         else:
             query_cos, query_sin = cache_view.query_cos, cache_view.query_sin
-        roped_query = apply_minwm_rotary_embedding(query, query_cos, query_sin).type_as(
+        roped_query = apply_zing_rotary_embedding(query, query_cos, query_sin).type_as(
             value
         )
         if (
-            _MINWM_CACHE_ROTATED_K
+            _ZING_CACHE_ROTATED_K
             and cache_view.rotated_k_is_valid
             and cache_view.is_recompute
         ):
             rotated_current_key = cache_view.rotated_k[
                 :, cache_view.current_local_start : cache_view.current_local_end
             ]
-            apply_minwm_rotary_embedding_out(
+            apply_zing_rotary_embedding_out(
                 key, query_cos, query_sin, rotated_current_key
             )
             attention_key = cache_view.rotated_k
         else:
             if cache_view.key_cos is None or cache_view.key_sin is None:
-                key_cos, key_sin = self._minwm_rotary_emb.forward_uncached(
+                key_cos, key_sin = self._zing_rotary_emb.forward_uncached(
                     cache_view.key_position_ids
                 )
             else:
                 key_cos, key_sin = cache_view.key_cos, cache_view.key_sin
-            if _MINWM_CACHE_ROTATED_K:
-                attention_key = apply_minwm_rotary_embedding_out(
+            if _ZING_CACHE_ROTATED_K:
+                attention_key = apply_zing_rotary_embedding_out(
                     cache_view.k, key_cos, key_sin, cache_view.rotated_k
                 )
                 kv_cache.rotated_k_is_valid = True
             else:
-                attention_key = apply_minwm_rotary_embedding(
+                attention_key = apply_zing_rotary_embedding(
                     cache_view.k, key_cos, key_sin
                 ).type_as(value)
         attention_value = cache_view.v
-        parity_dump_dir = getattr(self, "_minwm_parity_dump_dir", None)
-        parity_index = getattr(self, "_minwm_parity_forward_index", 0)
+        parity_dump_dir = getattr(self, "_zing_parity_dump_dir", None)
+        parity_index = getattr(self, "_zing_parity_forward_index", 0)
         if parity_dump_dir is not None and parity_index < 2:
             torch.save(
                 query.detach().cpu(),
@@ -776,12 +776,12 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                 attention_key.detach().cpu(),
                 parity_dump_dir / f"self_k_roped_{parity_index:03d}.pt",
             )
-        if _MINWM_ATTENTION_IMPL == "dense":
+        if _ZING_ATTENTION_IMPL == "dense":
             output = (self.ulysses_attn if sequence_shard_enabled else self.attn)(
                 roped_query, attention_key, attention_value
             )
         else:
-            output = _minwm_packed_varlen_attention(
+            output = _zing_packed_varlen_attention(
                 roped_query, attention_key, attention_value
             )
         if parity_dump_dir is not None:
@@ -790,7 +790,7 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
                     output.detach().cpu(),
                     parity_dump_dir / f"self_attention_output_{parity_index:03d}.pt",
                 )
-            self._minwm_parity_forward_index = parity_index + 1
+            self._zing_parity_forward_index = parity_index + 1
         if sequence_shard_enabled:
             assert seq_splits is not None
             if uniform_seq_splits:
@@ -808,8 +808,8 @@ class MinWMCausalSelfAttention(CausalWanSelfAttention):
         return output
 
 
-class MinWMPackedCrossAttention(WanT2VCrossAttention):
-    """Full-512 text attention with minWM main's packed-varlen FA4 call."""
+class ZingPackedCrossAttention(WanT2VCrossAttention):
+    """Full-512 text attention with Zing main's packed-varlen FA4 call."""
 
     def forward(self, x, context, context_lens, crossattn_cache=None):
         del context_lens
@@ -834,10 +834,10 @@ class MinWMPackedCrossAttention(WanT2VCrossAttention):
             if crossattn_cache is not None:
                 crossattn_cache.store(key, value)
 
-        if _MINWM_ATTENTION_IMPL == "dense":
+        if _ZING_ATTENTION_IMPL == "dense":
             output = self.attn(query, key, value).flatten(2)
         else:
-            output = _minwm_packed_varlen_attention(query, key, value).flatten(2)
+            output = _zing_packed_varlen_attention(query, key, value).flatten(2)
         output, _ = self.to_out(output)
         return output
 
@@ -865,7 +865,7 @@ def _frame_gate(
     *,
     num_frames: int,
 ) -> torch.Tensor:
-    """Promote each BF16 gate operand before adding, as minWM main does."""
+    """Promote each BF16 gate operand before adding, as Zing main does."""
     value = (
         model_value.to(hidden_states.dtype).float()
         + timestep_value.to(hidden_states.dtype).float()
@@ -877,25 +877,25 @@ def _frame_gate(
     )
 
 
-def _minwm_adaln_modulation(
+def _zing_adaln_modulation(
     hidden_states: torch.Tensor,
     shift: torch.Tensor,
     scale: torch.Tensor,
     *,
     eps: float,
 ) -> torch.Tensor:
-    """Match minWM's non-Triton ``adaln_op`` normalization and final cast."""
+    """Match Zing's non-Triton ``adaln_op`` normalization and final cast."""
     normalized = F.layer_norm(
         hidden_states.float(), (hidden_states.shape[-1],), eps=eps
     )
     return (normalized * (1 + scale.float()) + shift.float()).type_as(hidden_states)
 
 
-class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
-    """Causal Wan block with minWM main's exact eager rounding order."""
+class ZingCausalTransformerBlock(CausalWanTransformerBlock):
+    """Causal Wan block with Zing main's exact eager rounding order."""
 
-    self_attention_cls = MinWMCausalSelfAttention
-    cross_attention_cls = MinWMPackedCrossAttention
+    self_attention_cls = ZingCausalSelfAttention
+    cross_attention_cls = ZingPackedCrossAttention
 
     def forward(
         self,
@@ -914,13 +914,13 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
         num_frames = temb.shape[1]
         orig_dtype = hidden_states.dtype
         modulation = self.scale_shift_table.to(orig_dtype)
-        frame_index = _minwm_frame_indices(hidden_states, num_frames)
-        # minWM main first expands the full [B, F, 6, D] tensor with advanced
+        frame_index = _zing_frame_indices(hidden_states, num_frames)
+        # Zing main first expands the full [B, F, 6, D] tensor with advanced
         # indexing, then selects a modulation slice. Besides equal values, this
         # preserves its non-contiguous 6*D token stride for the compiled AdaLN.
         timestep_modulation = temb[:, frame_index]
 
-        _, norm_hidden_states = _minwm_adaln(
+        _, norm_hidden_states = _zing_adaln(
             hidden_states,
             modulation[:, 0],
             modulation[:, 1],
@@ -939,7 +939,7 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
             key = key.squeeze(1).unflatten(2, (self.local_num_heads, self.dim_head))
             qk_already_roped = False
         else:
-            qk_op = _minwm_qk_norm_rope_op if kv_cache is None else _minwm_qk_norm_op
+            qk_op = _zing_qk_norm_rope_op if kv_cache is None else _zing_qk_norm_op
             qk_args = [
                 query.squeeze(1),
                 key.squeeze(1),
@@ -950,9 +950,9 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
             if kv_cache is None:
                 qk_args.append(torch.stack(freqs_cis, dim=-1))
             qk_args.append(self.local_num_heads)
-            # minWM main's inference/cache path calls qk_norm_op eagerly.
+            # Zing main's inference/cache path calls qk_norm_op eagerly.
             # Compiling this reduction changes its BF16 rounding boundary.
-            query, key = _minwm_apply_qk_op(
+            query, key = _zing_apply_qk_op(
                 qk_op,
                 qk_args,
                 use_cache=kv_cache is not None,
@@ -974,24 +974,24 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
         attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
 
-        hidden_states = _minwm_adaln(
+        hidden_states = _zing_adaln(
             hidden_states,
             y=attn_output,
             m_gate=modulation[:, 2],
             e_gate=timestep_modulation.select(-2, 2),
         )
-        parity_dump_dir = getattr(self, "_minwm_parity_dump_dir", None)
-        parity_index = getattr(self, "_minwm_parity_forward_index", 0)
+        parity_dump_dir = getattr(self, "_zing_parity_dump_dir", None)
+        parity_index = getattr(self, "_zing_parity_forward_index", 0)
         if parity_dump_dir is not None:
             if parity_index < 2:
                 torch.save(
                     hidden_states.detach().cpu(),
                     parity_dump_dir / f"self_residual_norm_input_{parity_index:03d}.pt",
                 )
-            self._minwm_parity_forward_index = parity_index + 1
+            self._zing_parity_forward_index = parity_index + 1
 
         affine_norm = self.self_attn_residual_norm.norm
-        norm_hidden_states = _minwm_layer_norm(
+        norm_hidden_states = _zing_layer_norm(
             hidden_states,
             eps=affine_norm.eps,
             weight=affine_norm.weight,
@@ -1009,7 +1009,7 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
             crossattn_cache=crossattn_cache,
         )
 
-        hidden_states, norm_hidden_states = _minwm_adaln(
+        hidden_states, norm_hidden_states = _zing_adaln(
             hidden_states,
             modulation[:, 3],
             modulation[:, 4],
@@ -1020,7 +1020,7 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
         )
 
         ff_output = self.ffn(norm_hidden_states)
-        return _minwm_adaln(
+        return _zing_adaln(
             hidden_states,
             y=ff_output,
             m_gate=modulation[:, 5],
@@ -1028,43 +1028,42 @@ class MinWMCausalTransformerBlock(CausalWanTransformerBlock):
         )
 
 
-class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
-    _aliases = ["ZingCausalTransformer3DModel"]
-    transformer_block_cls = MinWMCausalTransformerBlock
-    patch_embedding_cls = MinWMPatchEmbed
-    param_names_mapping = MinWMVideoConfig().param_names_mapping
-    reverse_param_names_mapping = MinWMVideoConfig().reverse_param_names_mapping
-    lora_param_names_mapping = MinWMVideoConfig().lora_param_names_mapping
+class ZingCausalTransformer3DModel(CausalWanTransformer3DModel):
+    transformer_block_cls = ZingCausalTransformerBlock
+    patch_embedding_cls = ZingPatchEmbed
+    param_names_mapping = ZingVideoConfig().param_names_mapping
+    reverse_param_names_mapping = ZingVideoConfig().reverse_param_names_mapping
+    lora_param_names_mapping = ZingVideoConfig().lora_param_names_mapping
 
     def __init__(self, config, hf_config, quant_config=None) -> None:
-        if _MINWM_ATTENTION_IMPL not in {"packed", "dense"}:
+        if _ZING_ATTENTION_IMPL not in {"packed", "dense"}:
             raise ValueError(
-                "MINWM_ATTENTION_IMPL must be 'packed' or 'dense', got "
-                f"{_MINWM_ATTENTION_IMPL!r}"
+                "ZING_ATTENTION_IMPL must be 'packed' or 'dense', got "
+                f"{_ZING_ATTENTION_IMPL!r}"
             )
-        if _MINWM_RMSNORM_IMPL not in {"auto", "jit", "torch"}:
+        if _ZING_RMSNORM_IMPL not in {"auto", "jit", "torch"}:
             raise ValueError(
-                "MINWM_RMSNORM_IMPL must be 'auto', 'jit', or 'torch', got "
-                f"{_MINWM_RMSNORM_IMPL!r}"
+                "ZING_RMSNORM_IMPL must be 'auto', 'jit', or 'torch', got "
+                f"{_ZING_RMSNORM_IMPL!r}"
             )
         logger.info(
-            "MinWM execution profile: attention_impl=%s "
+            "Zing execution profile: attention_impl=%s "
             "packed_deterministic=%s segment_compile=%s rmsnorm_impl=%s "
             "cache_rotated_k=%s "
             "precompute_cache_rope=%s cache_packed_metadata=%s",
-            _MINWM_ATTENTION_IMPL,
-            _MINWM_PACKED_ATTENTION_DETERMINISTIC,
-            _MINWM_SEGMENT_COMPILE,
-            _MINWM_RMSNORM_IMPL,
-            _MINWM_CACHE_ROTATED_K,
-            _MINWM_PRECOMPUTE_CACHE_ROPE,
-            _MINWM_CACHE_PACKED_METADATA,
+            _ZING_ATTENTION_IMPL,
+            _ZING_PACKED_ATTENTION_DETERMINISTIC,
+            _ZING_SEGMENT_COMPILE,
+            _ZING_RMSNORM_IMPL,
+            _ZING_CACHE_ROTATED_K,
+            _ZING_PRECOMPUTE_CACHE_ROPE,
+            _ZING_CACHE_PACKED_METADATA,
         )
-        if _MINWM_PARITY_DETERMINISTIC:
+        if _ZING_PARITY_DETERMINISTIC:
             torch.use_deterministic_algorithms(True)
         super().__init__(config, hf_config, quant_config)
         self.sp_size = get_sp_world_size()
-        ulysses_workspace = _MinWMUlyssesWorkspace() if self.sp_size > 1 else None
+        ulysses_workspace = _ZingUlyssesWorkspace() if self.sp_size > 1 else None
         d = self.hidden_size // self.num_attention_heads
         self._sequence_shard_rotary_emb = NDRotaryEmbedding(
             rope_dim_list=[d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)],
@@ -1076,7 +1075,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             ),
         )
         old_time = self.condition_embedder.time_embedder
-        exact_time = _MinWMTimestepEmbedder(
+        exact_time = _ZingTimestepEmbedder(
             self.hidden_size,
             act_layer="silu",
             frequency_embedding_size=config.freq_dim,
@@ -1084,12 +1083,12 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         exact_time.mlp = old_time.mlp
         self.condition_embedder.time_embedder = exact_time
         for block in self.blocks:
-            block.attn1.rotary_embedding_override = apply_minwm_rotary_embedding
+            block.attn1.rotary_embedding_override = apply_zing_rotary_embedding
             block.attn1.ulysses_workspace = ulysses_workspace
-            block.norm_q = MinWMRMSNorm(config.hidden_size, eps=config.eps)
-            block.norm_k = MinWMRMSNorm(config.hidden_size, eps=config.eps)
-            block.attn2.norm_q = MinWMRMSNorm(config.hidden_size, eps=config.eps)
-            block.attn2.norm_k = MinWMRMSNorm(config.hidden_size, eps=config.eps)
+            block.norm_q = ZingRMSNorm(config.hidden_size, eps=config.eps)
+            block.norm_k = ZingRMSNorm(config.hidden_size, eps=config.eps)
+            block.attn2.norm_q = ZingRMSNorm(config.hidden_size, eps=config.eps)
+            block.attn2.norm_k = ZingRMSNorm(config.hidden_size, eps=config.eps)
         action_encoder_cls = (
             PrimitiveRoPETokenResidualActionEncoder
             if config.action_type == "primitive_rope_token_residual"
@@ -1107,7 +1106,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         expected_history = 2 * (config.action_kernel_size - 1)
         if self.action_history_frames != expected_history:
             raise ValueError(
-                "MinWM action_history_frames must equal "
+                "Zing action_history_frames must equal "
                 f"2 * (action_kernel_size - 1) = {expected_history}"
             )
         self._install_parity_debug_hooks()
@@ -1174,7 +1173,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         start_frame: int = 0,
         action: torch.Tensor | None = None,
         action_token_residual: torch.Tensor | None = None,
-        precomputed_attention_plan: MinWMCausalAttentionKVPlan | None = None,
+        precomputed_attention_plan: ZingCausalAttentionKVPlan | None = None,
     ) -> torch.Tensor:
         if kv_cache is not None:
             attention_plan = precomputed_attention_plan
@@ -1186,9 +1185,9 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
                     start_frame=start_frame,
                 )
             for cache_block in kv_cache:
-                if not isinstance(cache_block, MinWMCausalSelfAttentionKVCache):
+                if not isinstance(cache_block, ZingCausalSelfAttentionKVCache):
                     raise TypeError(
-                        "MinWM transformer requires position-aware raw-K caches"
+                        "Zing transformer requires position-aware raw-K caches"
                     )
                 cache_block.set_prepared_attention_plan(attention_plan)
 
@@ -1216,22 +1215,22 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         ulysses_world_size = get_ulysses_parallel_world_size()
         if get_ring_parallel_world_size() > 1:
             raise NotImplementedError(
-                "MinWM causal sequence sharding supports Ulysses with "
+                "Zing causal sequence sharding supports Ulysses with "
                 "ring_degree = 1 only."
             )
         if ulysses_world_size <= 1 or ulysses_world_size != self.sp_size:
             raise ValueError(
-                "MinWM causal sequence sharding requires "
+                "Zing causal sequence sharding requires "
                 "sp_degree == ulysses_degree > 1."
             )
         if get_tp_world_size() > 1:
             raise NotImplementedError(
-                "MinWM causal sequence sharding cannot be combined with tensor "
+                "Zing causal sequence sharding cannot be combined with tensor "
                 "parallelism yet."
             )
         if kv_cache is None or crossattn_cache is None:
             raise ValueError(
-                "MinWM causal sequence sharding requires self- and "
+                "Zing causal sequence sharding requires self- and "
                 "cross-attention KV caches."
             )
 
@@ -1312,7 +1311,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             encoder_hidden_states = encoder_hidden_states.to(orig_dtype)
         if encoder_hidden_states.dtype != orig_dtype:
             raise ValueError(
-                "MinWM encoder hidden-state dtype must match the latent dtype."
+                "Zing encoder hidden-state dtype must match the latent dtype."
             )
 
         for block_index, block in enumerate(self.blocks):
@@ -1360,7 +1359,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         kv_cache,
         current_start: int,
         start_frame: int,
-    ) -> MinWMCausalAttentionKVPlan:
+    ) -> ZingCausalAttentionKVPlan:
         """Prepare host-side cache metadata before an eager or graphed forward."""
         _, _, num_frames, latent_height, latent_width = hidden_states.shape
         _, patch_height, patch_width = self.patch_size
@@ -1374,13 +1373,13 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             hidden_states.device,
         )
         metadata_cache = kv_cache[0]
-        if not isinstance(metadata_cache, MinWMCausalSelfAttentionKVCache):
-            raise TypeError("MinWM transformer requires position-aware raw-K caches")
+        if not isinstance(metadata_cache, ZingCausalSelfAttentionKVCache):
+            raise TypeError("Zing transformer requires position-aware raw-K caches")
         attention_plan = metadata_cache.prepare_attention_plan(
             current_chunk_start=current_start,
             position_ids=position_ids,
         )
-        if _MINWM_PRECOMPUTE_CACHE_ROPE and attention_plan.query_cos is None:
+        if _ZING_PRECOMPUTE_CACHE_ROPE and attention_plan.query_cos is None:
             (
                 attention_plan.query_cos,
                 attention_plan.query_sin,
@@ -1396,7 +1395,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         return attention_plan
 
     def _install_parity_debug_hooks(self) -> None:
-        dump_root = os.environ.get("MINWM_PARITY_DUMP_DIR")
+        dump_root = os.environ.get("ZING_PARITY_DUMP_DIR")
         if not dump_root:
             return
         dump_dir = (
@@ -1438,7 +1437,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
                 )
             dump(block_name, output)
 
-        dump_all_blocks = os.environ.get("MINWM_PARITY_DUMP_ALL_BLOCKS", "0") == "1"
+        dump_all_blocks = os.environ.get("ZING_PARITY_DUMP_ALL_BLOCKS", "0") == "1"
         debug_blocks = self.blocks if dump_all_blocks else self.blocks[:1]
         for block_index, block in enumerate(debug_blocks):
             block_name = f"block{block_index}"
@@ -1485,10 +1484,10 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             module.register_forward_hook(hook)
 
         block0 = self.blocks[0]
-        block0._minwm_parity_dump_dir = dump_dir
-        block0._minwm_parity_forward_index = 0
-        block0.attn1._minwm_parity_dump_dir = dump_dir
-        block0.attn1._minwm_parity_forward_index = 0
+        block0._zing_parity_dump_dir = dump_dir
+        block0._zing_parity_forward_index = 0
+        block0.attn1._zing_parity_dump_dir = dump_dir
+        block0.attn1._zing_parity_forward_index = 0
         detail_modules = {
             "time_embed": self.condition_embedder.time_embedder,
             "time_projection": self.condition_embedder.time_modulation,
@@ -1540,7 +1539,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         if action_token_residual is None:
             if action is None:
                 raise ValueError(
-                    "MinWM requires an action label for every latent frame; use 0 "
+                    "Zing requires an action label for every latent frame; use 0 "
                     "for noop"
                 )
             action_token_residual = self.prepare_action_token_residual(
@@ -1552,15 +1551,15 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             )
         if action_token_residual.shape != hidden_states.shape:
             raise ValueError(
-                "MinWM action token residual shape must match patch tokens: "
+                "Zing action token residual shape must match patch tokens: "
                 f"{tuple(action_token_residual.shape)} != {tuple(hidden_states.shape)}"
             )
         if action_token_residual.dtype != hidden_states.dtype:
             raise ValueError(
-                "MinWM action token residual dtype must match patch tokens: "
+                "Zing action token residual dtype must match patch tokens: "
                 f"{action_token_residual.dtype} != {hidden_states.dtype}"
             )
-        # minWM materializes both patch and action token lists through
+        # Zing materializes both patch and action token lists through
         # ``torch.cat`` before this add. Even for B=1 that makes the block input
         # contiguous; a channel-first stride selects a different compiled
         # LayerNorm reduction on B200 despite identical tensor values.
@@ -1578,9 +1577,9 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         num_frames = timestep.shape[1]
         temb = temb.unflatten(dim=0, sizes=timestep.shape).to(hidden_states.dtype)
         modulation = self.scale_shift_table.to(hidden_states.dtype)
-        frame_index = _minwm_frame_indices(hidden_states, num_frames)
+        frame_index = _zing_frame_indices(hidden_states, num_frames)
         timestep_value = temb[:, frame_index]
-        _, normalized = _minwm_adaln(
+        _, normalized = _zing_adaln(
             hidden_states,
             modulation[:, 0],
             modulation[:, 1],
@@ -1588,11 +1587,11 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
             timestep_value,
             self.norm_out.norm.eps,
         )
-        if _minwm_should_restore_reference_output_projection(
+        if _zing_should_restore_reference_output_projection(
             normalized,
             sequence_shard_splits,
         ):
-            return _minwm_project_output_in_reference_row_bucket(
+            return _zing_project_output_in_reference_row_bucket(
                 self.proj_out,
                 normalized,
                 sequence_shard_splits,
@@ -1601,7 +1600,7 @@ class MinWMCausalTransformer3DModel(CausalWanTransformer3DModel):
         return self.proj_out(normalized)
 
 
-def _minwm_should_restore_reference_output_projection(
+def _zing_should_restore_reference_output_projection(
     hidden_states: torch.Tensor,
     sequence_shard_splits: list[int] | tuple[int, ...] | None,
 ) -> bool:
@@ -1615,7 +1614,7 @@ def _minwm_should_restore_reference_output_projection(
     )
 
 
-def _minwm_project_output_in_reference_row_bucket(
+def _zing_project_output_in_reference_row_bucket(
     projection: nn.Module,
     hidden_states: torch.Tensor,
     sequence_shard_splits: list[int] | tuple[int, ...],
@@ -1650,4 +1649,4 @@ def _minwm_project_output_in_reference_row_bucket(
     return projected.narrow(1, row_start, local_seq_len)
 
 
-EntryClass = MinWMCausalTransformer3DModel
+EntryClass = ZingCausalTransformer3DModel

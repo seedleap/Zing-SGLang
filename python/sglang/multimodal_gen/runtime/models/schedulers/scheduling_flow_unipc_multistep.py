@@ -832,11 +832,11 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
         return noisy_samples
 
 
-class MinWMFlowUniPCParityScheduler(FlowUniPCMultistepScheduler):
-    """UniPC arithmetic matching minWM V3 main for exact parity.
+class ZingFlowUniPCParityScheduler(FlowUniPCMultistepScheduler):
+    """UniPC arithmetic matching Zing V3 main for exact parity.
 
     The generic SGLang scheduler deliberately keeps scalar math on the GPU and
-    uses a closed-form order-2 corrector. minWM V3 instead stores sigmas on the
+    uses a closed-form order-2 corrector. Zing V3 instead stores sigmas on the
     CPU, materializes scalar lists with ``torch.tensor``, and calls
     ``torch.linalg.solve``. Those choices are mathematically equivalent but not
     bitwise equivalent, and the difference compounds across causal chunks.

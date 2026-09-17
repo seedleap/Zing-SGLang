@@ -20,7 +20,7 @@ namespace sglang {
 
 namespace {
 
-struct MinWMRMSNormParams {
+struct ZingRMSNormParams {
   const void* q_input;
   const void* k_input;
   const void* __restrict__ q_weight;
@@ -35,27 +35,27 @@ struct MinWMRMSNormParams {
   float eps;
 };
 
-// One full-width MinWM row is 6 KiB in fp16/bf16. Assign one naturally aligned
+// One full-width Zing row is 6 KiB in fp16/bf16. Assign one naturally aligned
 // maximum-width vector to each thread: 384 x 16B on Hopper and 192 x 32B on
 // Blackwell. A CTA therefore consumes a row in one coalesced pass while keeping
 // the input resident in registers across the reduction.
 template <int64_t kDim, typename DType>
-inline constexpr uint32_t kMinWMThreadsPerBlock = kDim / (device::kMaxVecBytes / sizeof(DType));
+inline constexpr uint32_t kZingThreadsPerBlock = kDim / (device::kMaxVecBytes / sizeof(DType));
 
 template <int64_t kDim, bool kUsePDL, typename DType>
-__global__ __launch_bounds__(kMinWMThreadsPerBlock<kDim, DType>) void minwm_rmsnorm_vector_cta(
-    const MinWMRMSNormParams __grid_constant__ params) {
+__global__ __launch_bounds__(kZingThreadsPerBlock<kDim, DType>) void zing_rmsnorm_vector_cta(
+    const ZingRMSNormParams __grid_constant__ params) {
   using namespace device;
 
   static_assert(std::is_same_v<DType, fp16_t> || std::is_same_v<DType, bf16_t>);
   using Packed = packed_t<DType>;
   constexpr uint32_t kPackedPerVector = kMaxVecBytes / sizeof(Packed);
   constexpr uint32_t kElementsPerVector = kMaxVecBytes / sizeof(DType);
-  constexpr uint32_t kThreadsPerBlock = kMinWMThreadsPerBlock<kDim, DType>;
+  constexpr uint32_t kThreadsPerBlock = kZingThreadsPerBlock<kDim, DType>;
   constexpr uint32_t kNumWarps = kThreadsPerBlock / kWarpThreads;
   using Storage = AlignedVector<Packed, kPackedPerVector>;
 
-  static_assert(kDim == 3072, "MinWM vector CTA is specialized for hidden_size=3072");
+  static_assert(kDim == 3072, "Zing vector CTA is specialized for hidden_size=3072");
   static_assert(kDim % kElementsPerVector == 0);
   static_assert(kThreadsPerBlock % kWarpThreads == 0);
   static_assert(kNumWarps <= kWarpThreads);
@@ -120,9 +120,9 @@ __global__ __launch_bounds__(kMinWMThreadsPerBlock<kDim, DType>) void minwm_rmsn
 }
 
 template <int64_t kDim, bool kUsePDL, typename DType>
-void launch_minwm_rmsnorm(const MinWMRMSNormParams& params, const DLDevice device) {
-  constexpr auto kernel = minwm_rmsnorm_vector_cta<kDim, kUsePDL, DType>;
-  constexpr uint32_t threads_per_block = kMinWMThreadsPerBlock<kDim, DType>;
+void launch_zing_rmsnorm(const ZingRMSNormParams& params, const DLDevice device) {
+  constexpr auto kernel = zing_rmsnorm_vector_cta<kDim, kUsePDL, DType>;
+  constexpr uint32_t threads_per_block = kZingThreadsPerBlock<kDim, DType>;
   static const uint32_t max_occupancy = host::runtime::get_blocks_per_sm(kernel, threads_per_block);
   static const uint32_t num_sms = host::runtime::get_sm_count(device.device_id);
   const uint32_t num_works = params.num_tokens * params.num_inputs;
@@ -131,7 +131,7 @@ void launch_minwm_rmsnorm(const MinWMRMSNormParams& params, const DLDevice devic
 }
 
 template <int64_t kDim, bool kUsePDL, typename DType>
-struct MinWMRMSNormKernel {
+struct ZingRMSNormKernel {
   static void
   run(const tvm::ffi::TensorView input,
       const tvm::ffi::TensorView weight,
@@ -150,8 +150,8 @@ struct MinWMRMSNormKernel {
     TensorMatcher({N, D}).with_strides({D, 1}).with_dtype<DType>().with_device(device).verify(output);
 
     const auto num_tokens = static_cast<uint32_t>(N.unwrap());
-    RuntimeCheck(num_tokens > 0, "minwm_rmsnorm: num_tokens must be > 0");
-    const auto params = MinWMRMSNormParams{
+    RuntimeCheck(num_tokens > 0, "zing_rmsnorm: num_tokens must be > 0");
+    const auto params = ZingRMSNormParams{
         .q_input = input.data_ptr(),
         .k_input = nullptr,
         .q_weight = weight.data_ptr(),
@@ -165,12 +165,12 @@ struct MinWMRMSNormKernel {
         .num_inputs = 1,
         .eps = eps,
     };
-    launch_minwm_rmsnorm<kDim, kUsePDL, DType>(params, device.unwrap());
+    launch_zing_rmsnorm<kDim, kUsePDL, DType>(params, device.unwrap());
   }
 };
 
 template <int64_t kDim, bool kUsePDL, typename DType>
-struct MinWMFusedQKNormKernel {
+struct ZingFusedQKNormKernel {
   static void
   run(const tvm::ffi::TensorView q,
       const tvm::ffi::TensorView k,
@@ -195,8 +195,8 @@ struct MinWMFusedQKNormKernel {
         k_output);
 
     const auto num_tokens = static_cast<uint32_t>(N.unwrap());
-    RuntimeCheck(num_tokens > 0, "minwm_fused_qknorm: num_tokens must be > 0");
-    const auto params = MinWMRMSNormParams{
+    RuntimeCheck(num_tokens > 0, "zing_fused_qknorm: num_tokens must be > 0");
+    const auto params = ZingRMSNormParams{
         .q_input = q.data_ptr(),
         .k_input = k.data_ptr(),
         .q_weight = q_weight.data_ptr(),
@@ -210,7 +210,7 @@ struct MinWMFusedQKNormKernel {
         .num_inputs = 2,
         .eps = eps,
     };
-    launch_minwm_rmsnorm<kDim, kUsePDL, DType>(params, device.unwrap());
+    launch_zing_rmsnorm<kDim, kUsePDL, DType>(params, device.unwrap());
   }
 };
 

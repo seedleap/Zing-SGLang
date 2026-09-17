@@ -1,4 +1,4 @@
-"""Fused CUDA pack kernel for MinWM's peer-first Ulysses QKV layout."""
+"""Fused CUDA pack kernel for Zing's peer-first Ulysses QKV layout."""
 
 from __future__ import annotations
 

@@ -39,12 +39,12 @@ from sglang.multimodal_gen.configs.pipeline_configs import (
     LingBotWorldCausalDMDConfig,
     LingBotWorldV2CausalDMDConfig,
     MiniMaxH3PipelineConfig,
-    MinWMCausalDMDConfig,
     WanI2V480PConfig,
     WanI2V720PConfig,
     WanT2V480PConfig,
     WanT2V720PConfig,
     ZImagePipelineConfig,
+    ZingCausalDMDConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
 from sglang.multimodal_gen.configs.pipeline_configs.ernie_image import (
@@ -201,7 +201,7 @@ from sglang.multimodal_gen.configs.sample.zimage import (
     ZImageSamplingParams,
     ZImageTurboSamplingParams,
 )
-from sglang.multimodal_gen.configs.sample.zing import MinWMSamplingParams
+from sglang.multimodal_gen.configs.sample.zing import ZingSamplingParams
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
     ComposedPipelineBase,
 )
@@ -944,8 +944,8 @@ def _register_configs():
         ],
     )
     register_configs(
-        sampling_param_cls=MinWMSamplingParams,
-        pipeline_config_cls=MinWMCausalDMDConfig,
+        sampling_param_cls=ZingSamplingParams,
+        pipeline_config_cls=ZingCausalDMDConfig,
         hf_model_paths=[
             "seedleap/Zing-0.5-SGLang",
         ],
@@ -953,7 +953,7 @@ def _register_configs():
             lambda model_id: any(
                 marker in model_id.lower()
                 for marker in (
-                    "minwm",
+                    "zing",
                     "zing-0.5",
                     "zingcausaldmdpipeline",
                     "zingcausalunipcpipeline",
